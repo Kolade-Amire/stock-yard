@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 
 from app.core.dependencies import get_analytics_service
 from app.schemas.analytics import (
@@ -18,9 +18,13 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 )
 async def ingest_analytics_event(
     payload: AnalyticsEventIngestRequest,
+    request: Request,
     service: AnalyticsService = Depends(get_analytics_service),
 ) -> AnalyticsEventIngestResponse:
-    return await service.ingest_event(payload)
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    forwarded_ip = forwarded_for.split(",", maxsplit=1)[0].strip() if forwarded_for else ""
+    client_ip = forwarded_ip or (request.client.host if request.client else None)
+    return await service.ingest_event(payload, client_ip=client_ip)
 
 
 @router.get("/popular", response_model=PopularTickersResponse)

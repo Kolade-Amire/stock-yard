@@ -11,6 +11,7 @@ from app.schemas.analytics import (
     PopularTicker,
     PopularTickersResponse,
 )
+from app.utils.rate_limit import SlidingWindowRateLimiter
 from app.utils.symbols import is_valid_symbol, normalize_symbol
 
 ALLOWED_EVENT_TYPES = frozenset({"search", "view", "chat_opened", "chat_message"})
@@ -20,16 +21,24 @@ MAX_SESSION_ID_LENGTH = 128
 
 
 class AnalyticsService:
-    def __init__(self, repository: AnalyticsRepository) -> None:
+    def __init__(
+        self,
+        repository: AnalyticsRepository,
+        rate_limiter: SlidingWindowRateLimiter,
+    ) -> None:
         self._repository = repository
+        self._rate_limiter = rate_limiter
 
     async def ingest_event(
         self,
         payload: AnalyticsEventIngestRequest,
+        client_ip: str | None,
     ) -> AnalyticsEventIngestResponse:
         symbol = self._normalize_and_validate_symbol(payload.symbol)
         event_type = self._normalize_and_validate_event_type(payload.eventType)
         session_id = self._normalize_session_id(payload.sessionId)
+        rate_limit_key = self._build_rate_limit_key(client_ip=client_ip, session_id=session_id)
+        self._enforce_ingest_rate_limit(rate_limit_key)
 
         created_at_epoch = await run_in_threadpool(
             self._repository.insert_event,
@@ -157,3 +166,27 @@ class AnalyticsService:
             )
 
         return normalized_window, window_seconds
+
+    def _enforce_ingest_rate_limit(self, key: str) -> None:
+        decision = self._rate_limiter.check(key)
+        if decision.allowed:
+            return
+
+        raise ApiError(
+            code="RATE_LIMITED",
+            message="Too many analytics events. Please retry shortly.",
+            status_code=429,
+            details={
+                "limit": self._rate_limiter.max_events,
+                "windowSeconds": self._rate_limiter.window_seconds,
+                "retryAfterSeconds": decision.retry_after_seconds,
+            },
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
+
+    @staticmethod
+    def _build_rate_limit_key(client_ip: str | None, session_id: str | None) -> str:
+        normalized_client_ip = (client_ip or "unknown").strip() or "unknown"
+        if session_id:
+            return f"{normalized_client_ip}:{session_id}"
+        return normalized_client_ip

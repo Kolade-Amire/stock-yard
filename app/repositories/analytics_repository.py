@@ -8,9 +8,9 @@ from app.db.sqlite import SQLiteDatabase
 
 EVENT_WEIGHTS: dict[str, int] = {
     "search": 1,
-    "view": 3,
-    "chat_opened": 2,
-    "chat_message": 4,
+    "view": 2,
+    "chat_opened": 0,
+    "chat_message": 3,
 }
 
 

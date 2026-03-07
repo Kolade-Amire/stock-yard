@@ -5,6 +5,7 @@ from app.db.sqlite import SQLiteDatabase
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.services.analytics_service import AnalyticsService
 from app.services.yfinance_service import YFinanceService
+from app.utils.rate_limit import SlidingWindowRateLimiter
 
 
 def get_app_settings() -> Settings:
@@ -34,5 +35,13 @@ def get_analytics_repository() -> AnalyticsRepository:
 
 
 @lru_cache
+def get_analytics_rate_limiter() -> SlidingWindowRateLimiter:
+    return SlidingWindowRateLimiter(max_events=60, window_seconds=60)
+
+
+@lru_cache
 def get_analytics_service() -> AnalyticsService:
-    return AnalyticsService(repository=get_analytics_repository())
+    return AnalyticsService(
+        repository=get_analytics_repository(),
+        rate_limiter=get_analytics_rate_limiter(),
+    )

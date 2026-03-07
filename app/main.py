@@ -44,7 +44,11 @@ async def api_error_handler(_: Request, exc: ApiError) -> JSONResponse:
     payload = ErrorResponse(
         error=ErrorBody(code=exc.code, message=exc.message, details=exc.details)
     )
-    return JSONResponse(status_code=exc.status_code, content=payload.model_dump())
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=payload.model_dump(),
+        headers=exc.headers,
+    )
 
 
 @app.exception_handler(RequestValidationError)
