@@ -25,3 +25,6 @@ data/*.db-wal
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+
+.postman
+postman/
