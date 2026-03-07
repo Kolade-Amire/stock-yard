@@ -2,14 +2,6 @@
 
 FastAPI backend for stock exploration and ticker-grounded AI chat.
 
-## Current status
-
-Pass 1 is implemented:
-- project scaffold and dependency manifest
-- environment-based settings
-- shared structured error handling
-- `GET /api/v1/health`
-
 ## Run locally
 
 ```bash
