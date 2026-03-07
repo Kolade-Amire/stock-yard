@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", alias="APP_ENV")
     app_name: str = Field(default="Stock Insight Backend", alias="APP_NAME")
     api_prefix: str = Field(default="/api/v1", alias="API_PREFIX")
+    sqlite_db_path: str = Field(default="./data/app.db", alias="SQLITE_DB_PATH")
     allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         alias="ALLOWED_ORIGINS",

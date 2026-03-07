@@ -46,3 +46,56 @@ class TickerOverviewResponse(BaseModel):
     symbol: str
     overview: TickerOverview
     dataLimitations: list[str] = Field(default_factory=list)
+
+
+class PriceBar(BaseModel):
+    timestamp: str
+    open: float
+    high: float
+    low: float
+    close: float
+    adj_close: float | None = None
+    volume: int | None = None
+
+
+class TickerHistoryResponse(BaseModel):
+    symbol: str
+    period: str
+    interval: str
+    bars: list[PriceBar] = Field(default_factory=list)
+
+
+class TickerNewsItem(BaseModel):
+    title: str | None = None
+    publisher: str | None = None
+    link: str | None = None
+    published_at: str | None = None
+    summary: str | None = None
+    source_type: str | None = None
+
+
+class TickerNewsResponse(BaseModel):
+    symbol: str
+    news: list[TickerNewsItem] = Field(default_factory=list)
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class FinancialSummary(BaseModel):
+    revenue_ttm: float | None = None
+    net_income_ttm: float | None = None
+    ebitda: float | None = None
+    gross_margins: float | None = None
+    operating_margins: float | None = None
+    profit_margins: float | None = None
+    free_cash_flow: float | None = None
+    total_cash: float | None = None
+    total_debt: float | None = None
+    debt_to_equity: float | None = None
+    return_on_equity: float | None = None
+    return_on_assets: float | None = None
+
+
+class FinancialSummaryResponse(BaseModel):
+    symbol: str
+    financialSummary: FinancialSummary
+    dataLimitations: list[str] = Field(default_factory=list)
