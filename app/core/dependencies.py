@@ -1,9 +1,14 @@
 from functools import lru_cache
 
+from app.core.errors import ApiError
 from app.core.config import Settings, get_settings
 from app.db.sqlite import SQLiteDatabase
+from app.providers.llm.base import LLMProvider
+from app.providers.llm.gemini_provider import GeminiProvider
+from app.providers.llm.openai_compat_provider import OpenAICompatProvider
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.services.analytics_service import AnalyticsService
+from app.services.chat_service import ChatService
 from app.services.yfinance_service import YFinanceService
 from app.utils.rate_limit import SlidingWindowRateLimiter
 
@@ -20,6 +25,8 @@ def get_yfinance_service() -> YFinanceService:
         cache_ttl_history_seconds=settings.cache_ttl_history_seconds,
         cache_ttl_news_seconds=settings.cache_ttl_news_seconds,
         cache_ttl_financials_seconds=settings.cache_ttl_financials_seconds,
+        cache_ttl_earnings_seconds=settings.cache_ttl_earnings_seconds,
+        cache_ttl_analyst_seconds=settings.cache_ttl_analyst_seconds,
     )
 
 
@@ -44,4 +51,37 @@ def get_analytics_service() -> AnalyticsService:
     return AnalyticsService(
         repository=get_analytics_repository(),
         rate_limiter=get_analytics_rate_limiter(),
+    )
+
+
+@lru_cache
+def get_llm_provider() -> LLMProvider:
+    settings = get_settings()
+    if settings.llm_provider == "gemini":
+        return GeminiProvider(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+        )
+    if settings.llm_provider == "openai_compat":
+        return OpenAICompatProvider(
+            base_url=settings.openai_compat_base_url,
+            api_key=settings.openai_compat_api_key,
+            model=settings.openai_compat_model,
+        )
+
+    raise ApiError(
+        code="LLM_ERROR",
+        message="Unsupported LLM provider configuration.",
+        status_code=500,
+        details={"llmProvider": settings.llm_provider},
+    )
+
+
+@lru_cache
+def get_chat_service() -> ChatService:
+    settings = get_settings()
+    return ChatService(
+        yfinance_service=get_yfinance_service(),
+        llm_provider=get_llm_provider(),
+        max_turns=settings.chat_max_turns,
     )

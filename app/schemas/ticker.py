@@ -99,3 +99,61 @@ class FinancialSummaryResponse(BaseModel):
     symbol: str
     financialSummary: FinancialSummary
     dataLimitations: list[str] = Field(default_factory=list)
+
+
+class EarningsContext(BaseModel):
+    next_earnings_date: str | None = None
+    earnings_date_candidates: list[str] = Field(default_factory=list)
+    eps_estimate_low: float | None = None
+    eps_estimate_avg: float | None = None
+    eps_estimate_high: float | None = None
+    revenue_estimate_low: float | None = None
+    revenue_estimate_avg: float | None = None
+    revenue_estimate_high: float | None = None
+    data_sources: list[str] = Field(default_factory=list)
+
+
+class EarningsContextResponse(BaseModel):
+    symbol: str
+    earningsContext: EarningsContext
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class AnalystRecommendationSnapshot(BaseModel):
+    period: str | None = None
+    strong_buy: int | None = None
+    buy: int | None = None
+    hold: int | None = None
+    sell: int | None = None
+    strong_sell: int | None = None
+
+
+class AnalystActionEvent(BaseModel):
+    graded_at: str | None = None
+    firm: str | None = None
+    to_grade: str | None = None
+    from_grade: str | None = None
+    action: str | None = None
+    price_target_action: str | None = None
+    current_price_target: float | None = None
+    prior_price_target: float | None = None
+
+
+class AnalystContext(BaseModel):
+    current_price_target: float | None = None
+    target_low: float | None = None
+    target_high: float | None = None
+    target_mean: float | None = None
+    target_median: float | None = None
+    recommendation_summary: AnalystRecommendationSnapshot = Field(
+        default_factory=AnalystRecommendationSnapshot
+    )
+    recent_actions: list[AnalystActionEvent] = Field(default_factory=list)
+    recent_action_count: int = 0
+    recent_action_window_days: int = 0
+
+
+class AnalystContextResponse(BaseModel):
+    symbol: str
+    analystContext: AnalystContext
+    dataLimitations: list[str] = Field(default_factory=list)

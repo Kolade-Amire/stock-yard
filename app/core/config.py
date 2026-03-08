@@ -9,6 +9,16 @@ class Settings(BaseSettings):
     app_name: str = Field(default="Stock Insight Backend", alias="APP_NAME")
     api_prefix: str = Field(default="/api/v1", alias="API_PREFIX")
     sqlite_db_path: str = Field(default="./data/app.db", alias="SQLITE_DB_PATH")
+    llm_provider: str = Field(default="gemini", alias="LLM_PROVIDER")
+    gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    openai_compat_base_url: str = Field(
+        default="http://localhost:1234/v1",
+        alias="OPENAI_COMPAT_BASE_URL",
+    )
+    openai_compat_api_key: str = Field(default="dummy", alias="OPENAI_COMPAT_API_KEY")
+    openai_compat_model: str = Field(default="local-model", alias="OPENAI_COMPAT_MODEL")
+    chat_max_turns: int = Field(default=12, alias="CHAT_MAX_TURNS", ge=1, le=100)
     allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         alias="ALLOWED_ORIGINS",
@@ -29,6 +39,14 @@ class Settings(BaseSettings):
         default=3600,
         alias="CACHE_TTL_FINANCIALS_SECONDS",
     )
+    cache_ttl_earnings_seconds: int = Field(
+        default=3600,
+        alias="CACHE_TTL_EARNINGS_SECONDS",
+    )
+    cache_ttl_analyst_seconds: int = Field(
+        default=3600,
+        alias="CACHE_TTL_ANALYST_SECONDS",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -43,6 +61,14 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("llm_provider", mode="before")
+    @staticmethod
+    def parse_llm_provider(value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"gemini", "openai_compat"}:
+            raise ValueError("LLM_PROVIDER must be either 'gemini' or 'openai_compat'.")
+        return normalized
 
 
 @lru_cache

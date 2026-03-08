@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import isfinite
 from typing import Any
 
@@ -9,6 +9,12 @@ from starlette.concurrency import run_in_threadpool
 from app.core.errors import ApiError
 from app.core.logging import get_logger
 from app.schemas.ticker import (
+    AnalystActionEvent,
+    AnalystContext,
+    AnalystContextResponse,
+    AnalystRecommendationSnapshot,
+    EarningsContext,
+    EarningsContextResponse,
     FinancialSummary,
     FinancialSummaryResponse,
     PriceBar,
@@ -33,6 +39,9 @@ from app.utils.symbols import is_valid_symbol, normalize_query, normalize_symbol
 
 ALLOWED_QUOTE_TYPES = {"EQUITY", "ETF"}
 MAX_NEWS_LIMIT = 50
+EARNINGS_DATES_LIMIT = 8
+ANALYST_ACTION_WINDOW_DAYS = 90
+MAX_ANALYST_ACTION_EVENTS = 5
 ALLOWED_HISTORY_PERIODS = frozenset({"1d", "5d", "1mo", "3mo", "6mo", "1y", "5y", "max"})
 ALLOWED_HISTORY_INTERVALS = frozenset({"1m", "5m", "15m", "1h", "1d", "1wk", "1mo"})
 ALLOWED_HISTORY_PERIODS_BY_INTERVAL = {
@@ -54,6 +63,8 @@ class YFinanceService:
         cache_ttl_history_seconds: int,
         cache_ttl_news_seconds: int,
         cache_ttl_financials_seconds: int,
+        cache_ttl_earnings_seconds: int,
+        cache_ttl_analyst_seconds: int,
     ) -> None:
         self._logger = get_logger(__name__)
         self._overview_cache = TTLCache[TickerOverviewResponse](cache_ttl_overview_seconds)
@@ -62,6 +73,8 @@ class YFinanceService:
         self._financial_summary_cache = TTLCache[FinancialSummaryResponse](
             cache_ttl_financials_seconds
         )
+        self._earnings_context_cache = TTLCache[EarningsContextResponse](cache_ttl_earnings_seconds)
+        self._analyst_context_cache = TTLCache[AnalystContextResponse](cache_ttl_analyst_seconds)
 
     async def search_tickers(self, query: str, limit: int = 10) -> TickerSearchResponse:
         normalized_query = normalize_query(query)
@@ -116,6 +129,36 @@ class YFinanceService:
             normalized_symbol,
         )
         self._financial_summary_cache.set(normalized_symbol, response)
+        return response
+
+    async def get_earnings_context(self, symbol: str) -> EarningsContextResponse:
+        normalized_symbol = self._normalize_and_validate_symbol(symbol)
+
+        cached = self._earnings_context_cache.get(normalized_symbol)
+        if cached is not None:
+            self._logger.info("Earnings context cache hit for %s", normalized_symbol)
+            return cached
+
+        response = await run_in_threadpool(
+            self._get_earnings_context_sync,
+            normalized_symbol,
+        )
+        self._earnings_context_cache.set(normalized_symbol, response)
+        return response
+
+    async def get_analyst_context(self, symbol: str) -> AnalystContextResponse:
+        normalized_symbol = self._normalize_and_validate_symbol(symbol)
+
+        cached = self._analyst_context_cache.get(normalized_symbol)
+        if cached is not None:
+            self._logger.info("Analyst context cache hit for %s", normalized_symbol)
+            return cached
+
+        response = await run_in_threadpool(
+            self._get_analyst_context_sync,
+            normalized_symbol,
+        )
+        self._analyst_context_cache.set(normalized_symbol, response)
         return response
 
     async def get_ticker_history(
@@ -396,6 +439,189 @@ class YFinanceService:
             symbol=symbol,
             financialSummary=summary,
             dataLimitations=limitations,
+        )
+
+    def _get_earnings_context_sync(self, symbol: str) -> EarningsContextResponse:
+        try:
+            ticker = yf.Ticker(symbol)
+            info = self._coerce_mapping(getattr(ticker, "info", {}))
+        except Exception as exc:
+            self._logger.exception("yfinance earnings fetch failed", exc_info=exc)
+            raise ApiError(
+                code="PROVIDER_ERROR",
+                message="Failed to fetch earnings context from market data provider.",
+                status_code=502,
+                details={"symbol": symbol},
+            ) from exc
+
+        limitations: list[str] = []
+        data_sources: list[str] = []
+        date_candidates: list[str] = []
+
+        try:
+            raw_earnings_dates = ticker.get_earnings_dates(limit=EARNINGS_DATES_LIMIT)
+            parsed_dates = self._extract_earnings_dates(raw_earnings_dates)
+            if parsed_dates:
+                date_candidates.extend(parsed_dates)
+                data_sources.append("earnings_dates")
+        except ImportError:
+            limitations.append(
+                "Detailed earnings-date history is unavailable because optional parsers are missing."
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "yfinance earnings_dates fetch failed for %s: %s",
+                symbol,
+                exc,
+            )
+            limitations.append("Detailed earnings-date history is unavailable from the data provider.")
+
+        calendar_data: dict[str, Any] = {}
+        try:
+            calendar_data = self._coerce_mapping(ticker.get_calendar())
+            if calendar_data:
+                data_sources.append("calendar")
+        except Exception as exc:
+            self._logger.warning("yfinance calendar fetch failed for %s: %s", symbol, exc)
+            limitations.append("Earnings calendar details are unavailable from the data provider.")
+
+        if info:
+            data_sources.append("info")
+
+        date_candidates.extend(self._extract_calendar_earnings_dates(calendar_data))
+        info_earnings_date = coerce_datetime_string(info.get("earningsDate"))
+        if info_earnings_date is not None:
+            date_candidates.append(info_earnings_date)
+
+        normalized_candidates = self._dedupe_preserve_order(date_candidates)
+        next_earnings_date = normalized_candidates[0] if normalized_candidates else None
+
+        earnings_context = EarningsContext(
+            next_earnings_date=next_earnings_date,
+            earnings_date_candidates=normalized_candidates,
+            eps_estimate_low=first_non_null(
+                coerce_float(calendar_data.get("Earnings Low")),
+                coerce_float(info.get("epsLow")),
+            ),
+            eps_estimate_avg=first_non_null(
+                coerce_float(calendar_data.get("Earnings Average")),
+                coerce_float(info.get("epsCurrentYear")),
+            ),
+            eps_estimate_high=first_non_null(
+                coerce_float(calendar_data.get("Earnings High")),
+                coerce_float(info.get("epsHigh")),
+            ),
+            revenue_estimate_low=coerce_float(calendar_data.get("Revenue Low")),
+            revenue_estimate_avg=coerce_float(calendar_data.get("Revenue Average")),
+            revenue_estimate_high=coerce_float(calendar_data.get("Revenue High")),
+            data_sources=self._dedupe_preserve_order(data_sources),
+        )
+
+        if self._earnings_context_has_no_material_data(earnings_context):
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Earnings context is unavailable for this ticker.",
+                status_code=404,
+                details={"symbol": symbol},
+            )
+
+        limitations.extend(self._build_earnings_limitations(earnings_context))
+        return EarningsContextResponse(
+            symbol=symbol,
+            earningsContext=earnings_context,
+            dataLimitations=self._dedupe_preserve_order(limitations),
+        )
+
+    def _get_analyst_context_sync(self, symbol: str) -> AnalystContextResponse:
+        try:
+            ticker = yf.Ticker(symbol)
+            info = self._coerce_mapping(getattr(ticker, "info", {}))
+        except Exception as exc:
+            self._logger.exception("yfinance analyst fetch failed", exc_info=exc)
+            raise ApiError(
+                code="PROVIDER_ERROR",
+                message="Failed to fetch analyst context from market data provider.",
+                status_code=502,
+                details={"symbol": symbol},
+            ) from exc
+
+        limitations: list[str] = []
+
+        price_targets: dict[str, Any] = {}
+        try:
+            price_targets = self._coerce_mapping(ticker.get_analyst_price_targets())
+        except Exception as exc:
+            self._logger.warning("yfinance analyst_price_targets fetch failed for %s: %s", symbol, exc)
+            limitations.append("Analyst price targets are unavailable from the data provider.")
+
+        recommendation_snapshot = AnalystRecommendationSnapshot()
+        recommendation_populated = False
+        try:
+            raw_recommendations = ticker.get_recommendations_summary()
+            recommendation_snapshot = self._extract_recommendation_snapshot(raw_recommendations)
+            recommendation_populated = self._recommendation_has_material_data(recommendation_snapshot)
+        except Exception as exc:
+            self._logger.warning(
+                "yfinance recommendations_summary fetch failed for %s: %s",
+                symbol,
+                exc,
+            )
+            limitations.append("Analyst recommendation summary is unavailable from the data provider.")
+
+        recent_actions: list[AnalystActionEvent] = []
+        try:
+            raw_actions = ticker.get_upgrades_downgrades()
+            recent_actions = self._extract_recent_analyst_actions(raw_actions)
+        except Exception as exc:
+            self._logger.warning("yfinance upgrades_downgrades fetch failed for %s: %s", symbol, exc)
+            limitations.append("Recent analyst action history is unavailable from the data provider.")
+
+        analyst_context = AnalystContext(
+            current_price_target=first_non_null(
+                coerce_float(price_targets.get("current")),
+                coerce_float(info.get("currentPrice")),
+                coerce_float(info.get("regularMarketPrice")),
+            ),
+            target_low=first_non_null(
+                coerce_float(price_targets.get("low")),
+                coerce_float(info.get("targetLowPrice")),
+            ),
+            target_high=first_non_null(
+                coerce_float(price_targets.get("high")),
+                coerce_float(info.get("targetHighPrice")),
+            ),
+            target_mean=first_non_null(
+                coerce_float(price_targets.get("mean")),
+                coerce_float(info.get("targetMeanPrice")),
+            ),
+            target_median=first_non_null(
+                coerce_float(price_targets.get("median")),
+                coerce_float(info.get("targetMedianPrice")),
+            ),
+            recommendation_summary=recommendation_snapshot,
+            recent_actions=recent_actions,
+            recent_action_count=len(recent_actions),
+            recent_action_window_days=ANALYST_ACTION_WINDOW_DAYS,
+        )
+
+        if self._analyst_context_has_no_material_data(analyst_context):
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Analyst context is unavailable for this ticker.",
+                status_code=404,
+                details={"symbol": symbol},
+            )
+
+        limitations.extend(
+            self._build_analyst_limitations(
+                analyst_context=analyst_context,
+                recommendation_has_data=recommendation_populated,
+            )
+        )
+        return AnalystContextResponse(
+            symbol=symbol,
+            analystContext=analyst_context,
+            dataLimitations=self._dedupe_preserve_order(limitations),
         )
 
     def _get_ticker_history_sync(
@@ -757,6 +983,229 @@ class YFinanceService:
                 coerce_str(value.get("name")),
             )
         return None
+
+    def _extract_earnings_dates(self, payload: Any) -> list[str]:
+        parsed_dates: list[str] = []
+
+        iterrows = getattr(payload, "iterrows", None)
+        if not callable(iterrows):
+            return parsed_dates
+
+        for row_index, row in iterrows():
+            row_mapping = self._coerce_mapping(row)
+            row_date = first_non_null(
+                coerce_datetime_string(row_mapping.get("Earnings Date")),
+                coerce_datetime_string(row_mapping.get("Date")),
+                coerce_datetime_string(row_mapping.get("EarningsDate")),
+                coerce_datetime_string(row_index),
+            )
+            if row_date is None:
+                continue
+            parsed_dates.append(row_date)
+            if len(parsed_dates) >= EARNINGS_DATES_LIMIT:
+                break
+
+        return self._dedupe_preserve_order(parsed_dates)
+
+    @staticmethod
+    def _extract_calendar_earnings_dates(calendar_data: dict[str, Any]) -> list[str]:
+        raw_dates = calendar_data.get("Earnings Date")
+        if raw_dates is None:
+            return []
+
+        values = raw_dates if isinstance(raw_dates, list) else [raw_dates]
+        parsed_dates = [coerce_datetime_string(value) for value in values]
+        return [value for value in parsed_dates if value is not None]
+
+    def _extract_recommendation_snapshot(self, payload: Any) -> AnalystRecommendationSnapshot:
+        iterrows = getattr(payload, "iterrows", None)
+        if not callable(iterrows):
+            return AnalystRecommendationSnapshot()
+
+        candidates: list[dict[str, Any]] = []
+        for _index, row in iterrows():
+            row_mapping = self._coerce_mapping(row)
+            if row_mapping:
+                candidates.append(row_mapping)
+
+        if not candidates:
+            return AnalystRecommendationSnapshot()
+
+        chosen = next(
+            (item for item in candidates if coerce_str(item.get("period")) == "0m"),
+            candidates[0],
+        )
+        return AnalystRecommendationSnapshot(
+            period=coerce_str(chosen.get("period")),
+            strong_buy=coerce_int(chosen.get("strongBuy")),
+            buy=coerce_int(chosen.get("buy")),
+            hold=coerce_int(chosen.get("hold")),
+            sell=coerce_int(chosen.get("sell")),
+            strong_sell=coerce_int(chosen.get("strongSell")),
+        )
+
+    def _extract_recent_analyst_actions(self, payload: Any) -> list[AnalystActionEvent]:
+        iterrows = getattr(payload, "iterrows", None)
+        if not callable(iterrows):
+            return []
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=ANALYST_ACTION_WINDOW_DAYS)
+        parsed_events: list[tuple[datetime | None, AnalystActionEvent]] = []
+
+        for row_index, row in iterrows():
+            row_mapping = self._coerce_mapping(row)
+            graded_at = first_non_null(
+                coerce_datetime_string(row_mapping.get("GradeDate")),
+                coerce_datetime_string(row_mapping.get("date")),
+                coerce_datetime_string(row_index),
+            )
+            parsed_dt = self._parse_iso_timestamp(graded_at)
+            if parsed_dt is not None and parsed_dt < cutoff:
+                continue
+
+            event = AnalystActionEvent(
+                graded_at=graded_at,
+                firm=coerce_str(row_mapping.get("Firm")),
+                to_grade=coerce_str(row_mapping.get("ToGrade")),
+                from_grade=coerce_str(row_mapping.get("FromGrade")),
+                action=coerce_str(row_mapping.get("Action")),
+                price_target_action=coerce_str(row_mapping.get("priceTargetAction")),
+                current_price_target=coerce_float(row_mapping.get("currentPriceTarget")),
+                prior_price_target=coerce_float(row_mapping.get("priorPriceTarget")),
+            )
+            if self._analyst_action_has_no_material_data(event):
+                continue
+
+            parsed_events.append((parsed_dt, event))
+
+        parsed_events.sort(
+            key=lambda item: item[0] if item[0] is not None else datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        return [item[1] for item in parsed_events[:MAX_ANALYST_ACTION_EVENTS]]
+
+    @staticmethod
+    def _parse_iso_timestamp(value: str | None) -> datetime | None:
+        if value is None:
+            return None
+        candidate = value.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed
+
+    @staticmethod
+    def _analyst_action_has_no_material_data(event: AnalystActionEvent) -> bool:
+        return all(
+            value is None
+            for value in (
+                event.graded_at,
+                event.firm,
+                event.to_grade,
+                event.from_grade,
+                event.action,
+                event.price_target_action,
+                event.current_price_target,
+                event.prior_price_target,
+            )
+        )
+
+    @staticmethod
+    def _earnings_context_has_no_material_data(earnings_context: EarningsContext) -> bool:
+        return all(
+            value is None
+            for value in (
+                earnings_context.next_earnings_date,
+                earnings_context.eps_estimate_low,
+                earnings_context.eps_estimate_avg,
+                earnings_context.eps_estimate_high,
+                earnings_context.revenue_estimate_low,
+                earnings_context.revenue_estimate_avg,
+                earnings_context.revenue_estimate_high,
+            )
+        )
+
+    @staticmethod
+    def _recommendation_has_material_data(snapshot: AnalystRecommendationSnapshot) -> bool:
+        return any(
+            value is not None
+            for value in (
+                snapshot.strong_buy,
+                snapshot.buy,
+                snapshot.hold,
+                snapshot.sell,
+                snapshot.strong_sell,
+            )
+        )
+
+    def _analyst_context_has_no_material_data(self, analyst_context: AnalystContext) -> bool:
+        return all(
+            value is None
+            for value in (
+                analyst_context.current_price_target,
+                analyst_context.target_low,
+                analyst_context.target_high,
+                analyst_context.target_mean,
+                analyst_context.target_median,
+            )
+        ) and not self._recommendation_has_material_data(analyst_context.recommendation_summary) and not analyst_context.recent_actions
+
+    @staticmethod
+    def _build_earnings_limitations(earnings_context: EarningsContext) -> list[str]:
+        limitations: list[str] = []
+        if earnings_context.next_earnings_date is None:
+            limitations.append("Upcoming earnings date is unavailable from the data provider.")
+        if (
+            earnings_context.eps_estimate_low is None
+            and earnings_context.eps_estimate_avg is None
+            and earnings_context.eps_estimate_high is None
+        ):
+            limitations.append("EPS estimates are unavailable from the data provider.")
+        if (
+            earnings_context.revenue_estimate_low is None
+            and earnings_context.revenue_estimate_avg is None
+            and earnings_context.revenue_estimate_high is None
+        ):
+            limitations.append("Revenue estimates are unavailable from the data provider.")
+        return limitations
+
+    @staticmethod
+    def _build_analyst_limitations(
+            *,
+        analyst_context: AnalystContext,
+        recommendation_has_data: bool,
+    ) -> list[str]:
+        limitations: list[str] = []
+        if (
+            analyst_context.target_low is None
+            and analyst_context.target_high is None
+            and analyst_context.target_mean is None
+            and analyst_context.target_median is None
+        ):
+            limitations.append("Analyst price targets are unavailable from the data provider.")
+        if not recommendation_has_data:
+            limitations.append("Analyst recommendation summary is unavailable from the data provider.")
+        if not analyst_context.recent_actions:
+            limitations.append(
+                f"No analyst upgrades/downgrades were returned in the last {ANALYST_ACTION_WINDOW_DAYS} days."
+            )
+        return limitations
+
+    @staticmethod
+    def _dedupe_preserve_order(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            deduped.append(value)
+        return deduped
 
     @staticmethod
     def _overview_has_no_material_data(overview: TickerOverview) -> bool:
