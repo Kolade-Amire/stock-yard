@@ -52,32 +52,106 @@ class OpenAICompatProvider(LLMProvider):
             ) from exc
 
         client = OpenAI(base_url=self._base_url, api_key=self._api_key)
+        serialized_messages = self._to_openai_messages(system_instruction, messages)
+        serialized_tools = self._to_openai_tools(tools)
+        has_prior_tool_results = any(message.role == "tool" for message in messages)
+        is_tool_selection_stage = bool(serialized_tools) and not has_prior_tool_results
+
+        # Stage 1: let local models decide on tool calls without schema pressure.
+        if is_tool_selection_stage:
+            self._logger.info("OpenAI-compatible stage=tool-selection")
+            tool_selection_payload = self._build_payload(
+                messages=serialized_messages,
+                tools=serialized_tools,
+                response_schema=None,
+            )
+            completion = self._request_completion(client=client, payload=tool_selection_payload)
+            completion_message = self._extract_choice_message(completion)
+            tool_calls = self._extract_tool_calls(completion_message)
+            if tool_calls:
+                self._logger.info(
+                    "OpenAI-compatible stage=tool-selection tool_calls=%d",
+                    len(tool_calls),
+                )
+                return LLMModelResponse(tool_calls=tool_calls)
+
+            self._logger.info(
+                "OpenAI-compatible stage=tool-selection tool_calls=0; fallback=structured-final"
+            )
+            # No tool calls were emitted; force a structured final answer for contract stability.
+            structured_final_payload = self._build_payload(
+                messages=serialized_messages,
+                tools=[],
+                response_schema=response_schema,
+            )
+        else:
+            self._logger.info(
+                "OpenAI-compatible stage=structured-final has_prior_tool_results=%s",
+                has_prior_tool_results,
+            )
+            structured_final_payload = self._build_payload(
+                messages=serialized_messages,
+                tools=serialized_tools,
+                response_schema=response_schema,
+            )
+
+        completion = self._request_completion(client=client, payload=structured_final_payload)
+        completion_message = self._extract_choice_message(completion)
+        tool_calls = self._extract_tool_calls(completion_message)
+        if tool_calls:
+            self._logger.info(
+                "OpenAI-compatible stage=structured-final tool_calls=%d",
+                len(tool_calls),
+            )
+            return LLMModelResponse(tool_calls=tool_calls)
+
+        text = self._extract_message_text(completion_message.content)
+        parsed = self._parse_json_text(text)
+        return LLMModelResponse(text=text, parsed=parsed)
+
+    def _build_payload(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        response_schema: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": self._to_openai_messages(system_instruction, messages),
-            "tools": self._to_openai_tools(tools),
+            "messages": messages,
+            "tools": tools or None,
             "tool_choice": "auto" if tools else None,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "chat_response",
-                    "schema": response_schema,
-                },
-            },
+            "response_format": (
+                {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "chat_response",
+                        "schema": response_schema,
+                    },
+                }
+                if response_schema is not None
+                else None
+            ),
         }
-        payload = {key: value for key, value in payload.items() if value is not None}
+        return {key: value for key, value in payload.items() if value is not None}
 
+    def _request_completion(self, *, client: Any, payload: dict[str, Any]) -> Any:
         try:
-            completion = client.chat.completions.create(**payload)
+            return client.chat.completions.create(**payload)
         except Exception as exc:
             lowered = str(exc).lower()
-            if "response_format" in lowered or "json_schema" in lowered:
+            can_retry_without_schema = (
+                "response_format" in payload
+                and ("response_format" in lowered or "json_schema" in lowered)
+            )
+            if can_retry_without_schema:
                 self._logger.warning(
                     "OpenAI-compatible endpoint rejected response_format; retrying without json schema."
                 )
-                payload.pop("response_format", None)
+                fallback_payload = dict(payload)
+                fallback_payload.pop("response_format", None)
                 try:
-                    completion = client.chat.completions.create(**payload)
+                    return client.chat.completions.create(**fallback_payload)
                 except Exception as nested_exc:
                     raise ApiError(
                         code="LLM_ERROR",
@@ -85,14 +159,16 @@ class OpenAICompatProvider(LLMProvider):
                         status_code=502,
                         details={"provider": "openai_compat"},
                     ) from nested_exc
-            else:
-                raise ApiError(
-                    code="LLM_ERROR",
-                    message="OpenAI-compatible provider request failed.",
-                    status_code=502,
-                    details={"provider": "openai_compat"},
-                ) from exc
 
+            raise ApiError(
+                code="LLM_ERROR",
+                message="OpenAI-compatible provider request failed.",
+                status_code=502,
+                details={"provider": "openai_compat"},
+            ) from exc
+
+    @staticmethod
+    def _extract_choice_message(completion: Any) -> Any:
         if not completion.choices:
             raise ApiError(
                 code="LLM_ERROR",
@@ -100,29 +176,29 @@ class OpenAICompatProvider(LLMProvider):
                 status_code=502,
                 details={"provider": "openai_compat"},
             )
+        return completion.choices[0].message
 
-        message = completion.choices[0].message
-        if message.tool_calls:
-            tool_calls: list[ToolCall] = []
-            for raw_tool_call in message.tool_calls:
-                name = raw_tool_call.function.name
-                arguments = self._parse_tool_arguments(raw_tool_call.function.arguments)
-                tool_calls.append(
-                    ToolCall(
-                        id=raw_tool_call.id or f"call_{uuid4().hex}",
-                        name=name,
-                        arguments=arguments,
-                    )
+    @staticmethod
+    def _extract_tool_calls(message: Any) -> list[ToolCall]:
+        if not message.tool_calls:
+            return []
+
+        tool_calls: list[ToolCall] = []
+        for raw_tool_call in message.tool_calls:
+            name = raw_tool_call.function.name
+            arguments = OpenAICompatProvider._parse_tool_arguments(raw_tool_call.function.arguments)
+            tool_calls.append(
+                ToolCall(
+                    id=raw_tool_call.id or f"call_{uuid4().hex}",
+                    name=name,
+                    arguments=arguments,
                 )
-            return LLMModelResponse(tool_calls=tool_calls)
-
-        text = self._extract_message_text(message.content)
-        parsed = self._parse_json_text(text)
-        return LLMModelResponse(text=text, parsed=parsed)
+            )
+        return tool_calls
 
     @staticmethod
     def _to_openai_messages(
-            system_instruction: str,
+        system_instruction: str,
         messages: list[LLMMessage],
     ) -> list[dict[str, Any]]:
         serialized_messages: list[dict[str, Any]] = [
