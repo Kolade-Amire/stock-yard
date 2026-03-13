@@ -1,0 +1,1 @@
+- OpenAI-compatible path's structured-final stage still includes tools (remove)

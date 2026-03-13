@@ -84,4 +84,8 @@ def get_chat_service() -> ChatService:
         yfinance_service=get_yfinance_service(),
         llm_provider=get_llm_provider(),
         max_turns=settings.chat_max_turns,
+        max_tool_call_rounds=settings.chat_max_tool_call_rounds,
+        history_recent_bars_limit=settings.chat_history_recent_bars_limit,
+        news_tool_default_limit=settings.chat_news_tool_default_limit,
+        tool_gating_mode=settings.chat_tool_gating_mode,
     )

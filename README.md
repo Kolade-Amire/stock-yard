@@ -10,6 +10,18 @@ cp .env.example .env
 uv run uvicorn app.main:app --reload
 ```
 
+## Chat cost controls
+
+These defaults favor a balanced quality/cost tradeoff for grounded chat:
+
+```env
+CHAT_MAX_TURNS=6
+CHAT_MAX_TOOL_CALL_ROUNDS=2
+CHAT_HISTORY_RECENT_BARS_LIMIT=12
+CHAT_NEWS_TOOL_DEFAULT_LIMIT=3
+CHAT_TOOL_GATING_MODE=balanced
+```
+
 ## Quick check
 
 ```bash

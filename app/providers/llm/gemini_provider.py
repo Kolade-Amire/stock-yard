@@ -7,6 +7,7 @@ from uuid import uuid4
 from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import ApiError
+from app.core.logging import get_logger
 from app.providers.llm.base import LLMMessage, LLMModelResponse, LLMProvider, ToolCall, ToolSpec
 
 
@@ -14,6 +15,7 @@ class GeminiProvider(LLMProvider):
     def __init__(self, *, api_key: str | None, model: str) -> None:
         self._api_key = api_key
         self._model = model
+        self._logger = get_logger(__name__)
 
     async def generate(
         self,
@@ -48,6 +50,7 @@ class GeminiProvider(LLMProvider):
 
         try:
             from google import genai
+            from google.genai import types
         except ImportError as exc:
             raise ApiError(
                 code="LLM_ERROR",
@@ -57,45 +60,114 @@ class GeminiProvider(LLMProvider):
             ) from exc
 
         client = genai.Client(api_key=self._api_key)
-        config = {
+        contents = self._to_gemini_contents(messages)
+        has_prior_tool_results = any(message.role == "tool" for message in messages)
+        has_tools = bool(tools)
+        is_tool_selection_stage = has_tools and not has_prior_tool_results
+
+        # Gemini rejects function-calling and structured JSON output in the same request.
+        if is_tool_selection_stage:
+            self._logger.info("Gemini stage=tool-selection")
+            tool_selection_config = self._build_config(
+                types_module=types,
+                system_instruction=system_instruction,
+                tools=tools,
+                response_schema=None,
+            )
+            response = self._request_generate_content(
+                client=client,
+                contents=contents,
+                config=tool_selection_config,
+            )
+            tool_calls = self._extract_tool_calls(response)
+            if tool_calls:
+                self._logger.info("Gemini stage=tool-selection tool_calls=%d", len(tool_calls))
+                return LLMModelResponse(tool_calls=tool_calls)
+
+            self._logger.info(
+                "Gemini stage=tool-selection tool_calls=0; fallback=structured-final"
+            )
+            structured_final_config = self._build_config(
+                types_module=types,
+                system_instruction=system_instruction,
+                tools=[],
+                response_schema=response_schema,
+            )
+        else:
+            self._logger.info(
+                "Gemini stage=structured-final has_prior_tool_results=%s",
+                has_prior_tool_results,
+            )
+            structured_final_config = self._build_config(
+                types_module=types,
+                system_instruction=system_instruction,
+                tools=[],
+                response_schema=response_schema,
+            )
+
+        response = self._request_generate_content(
+            client=client,
+            contents=contents,
+            config=structured_final_config,
+        )
+        text = self._extract_text(response)
+        parsed = self._parse_json_text(text)
+        return LLMModelResponse(text=text, parsed=parsed)
+
+    @staticmethod
+    def _build_config(
+            *,
+        types_module: Any,
+        system_instruction: str,
+        tools: list[ToolSpec],
+        response_schema: dict[str, Any] | None,
+    ) -> Any:
+        config_kwargs: dict[str, Any] = {
             "system_instruction": system_instruction,
-            "tools": [
-                {
-                    "function_declarations": [
-                        {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters,
-                        }
+        }
+        if tools:
+            config_kwargs["tools"] = [
+                types_module.Tool(
+                    function_declarations=[
+                        types_module.FunctionDeclaration(
+                            name=tool.name,
+                            description=tool.description,
+                            parameters_json_schema=tool.parameters,
+                        )
                         for tool in tools
                     ]
-                }
-            ],
-            "response_mime_type": "application/json",
-            "response_schema": response_schema,
-        }
+                )
+            ]
+        if response_schema is not None:
+            config_kwargs["response_mime_type"] = "application/json"
+            config_kwargs["response_json_schema"] = response_schema
+        return types_module.GenerateContentConfig(**config_kwargs)
 
+    def _request_generate_content(
+        self,
+        *,
+        client: Any,
+        contents: list[dict[str, Any]],
+        config: Any,
+    ) -> Any:
         try:
-            response = client.models.generate_content(
+            return client.models.generate_content(
                 model=self._model,
-                contents=self._to_gemini_contents(messages),
+                contents=contents,
                 config=config,
             )
         except Exception as exc:
+            safe_cause = self._safe_error_detail(exc)
+            self._logger.warning("Gemini request failed: %s", safe_cause)
             raise ApiError(
                 code="LLM_ERROR",
                 message="Gemini provider request failed.",
                 status_code=502,
-                details={"provider": "gemini"},
+                details={
+                    "provider": "gemini",
+                    "cause": safe_cause,
+                },
             ) from exc
-
-        tool_calls = self._extract_tool_calls(response)
-        if tool_calls:
-            return LLMModelResponse(tool_calls=tool_calls)
-
-        text = self._extract_text(response)
-        parsed = self._parse_json_text(text)
-        return LLMModelResponse(text=text, parsed=parsed)
 
     def _to_gemini_contents(self, messages: list[LLMMessage]) -> list[dict[str, Any]]:
         contents: list[dict[str, Any]] = []
@@ -202,3 +274,10 @@ class GeminiProvider(LLMProvider):
         if isinstance(parsed, dict):
             return parsed
         return {"value": parsed}
+
+    @staticmethod
+    def _safe_error_detail(exc: Exception) -> str:
+        detail = str(exc).replace("\n", " ").strip()
+        if not detail:
+            return exc.__class__.__name__
+        return detail[:300]
