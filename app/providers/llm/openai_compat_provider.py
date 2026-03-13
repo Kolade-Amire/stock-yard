@@ -76,7 +76,8 @@ class OpenAICompatProvider(LLMProvider):
                 return LLMModelResponse(tool_calls=tool_calls)
 
             self._logger.info(
-                "OpenAI-compatible stage=tool-selection tool_calls=0; fallback=structured-final"
+                "OpenAI-compatible stage=tool-selection tool_calls=0; "
+                "fallback=structured-final without_tools=True"
             )
             # No tool calls were emitted; force a structured final answer for contract stability.
             structured_final_payload = self._build_payload(
@@ -86,12 +87,13 @@ class OpenAICompatProvider(LLMProvider):
             )
         else:
             self._logger.info(
-                "OpenAI-compatible stage=structured-final has_prior_tool_results=%s",
+                "OpenAI-compatible stage=structured-final has_prior_tool_results=%s "
+                "without_tools=True",
                 has_prior_tool_results,
             )
             structured_final_payload = self._build_payload(
                 messages=serialized_messages,
-                tools=serialized_tools,
+                tools=[],
                 response_schema=response_schema,
             )
 
@@ -99,8 +101,8 @@ class OpenAICompatProvider(LLMProvider):
         completion_message = self._extract_choice_message(completion)
         tool_calls = self._extract_tool_calls(completion_message)
         if tool_calls:
-            self._logger.info(
-                "OpenAI-compatible stage=structured-final tool_calls=%d",
+            self._logger.warning(
+                "OpenAI-compatible stage=structured-final unexpected_tool_calls=%d",
                 len(tool_calls),
             )
             return LLMModelResponse(tool_calls=tool_calls)
