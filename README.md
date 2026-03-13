@@ -22,6 +22,17 @@ CHAT_NEWS_TOOL_DEFAULT_LIMIT=3
 CHAT_TOOL_GATING_MODE=balanced
 ```
 
+## Proxy header trust
+
+Analytics ingest rate limiting uses the actual client socket by default:
+
+```env
+TRUST_PROXY_HEADERS=false
+```
+
+Set `TRUST_PROXY_HEADERS=true` only when the app is behind a trusted reverse proxy that strips
+untrusted `X-Forwarded-For` headers. Leave it `false` for local development or direct app exposure.
+
 ## Quick check
 
 ```bash

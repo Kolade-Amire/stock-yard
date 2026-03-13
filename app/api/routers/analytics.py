@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query, Request, status
 
+from app.core.config import get_settings
 from app.core.dependencies import get_analytics_service
 from app.schemas.analytics import (
     AnalyticsEventIngestRequest,
@@ -21,9 +22,15 @@ async def ingest_analytics_event(
     request: Request,
     service: AnalyticsService = Depends(get_analytics_service),
 ) -> AnalyticsEventIngestResponse:
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    forwarded_ip = forwarded_for.split(",", maxsplit=1)[0].strip() if forwarded_for else ""
-    client_ip = forwarded_ip or (request.client.host if request.client else None)
+    settings = get_settings()
+    client_ip = request.client.host if request.client else None
+
+    if settings.trust_proxy_headers:
+        forwarded_for = request.headers.get("x-forwarded-for", "")
+        forwarded_ip = forwarded_for.split(",", maxsplit=1)[0].strip() if forwarded_for else ""
+        if forwarded_ip:
+            client_ip = forwarded_ip
+
     return await service.ingest_event(payload, client_ip=client_ip)
 
 

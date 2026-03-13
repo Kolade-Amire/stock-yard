@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         default="balanced",
         alias="CHAT_TOOL_GATING_MODE",
     )
+    trust_proxy_headers: bool = Field(
+        default=False,
+        alias="TRUST_PROXY_HEADERS",
+    )
     allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         alias="ALLOWED_ORIGINS",

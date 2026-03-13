@@ -503,10 +503,7 @@ class YFinanceService:
                 coerce_float(calendar_data.get("Earnings Low")),
                 coerce_float(info.get("epsLow")),
             ),
-            eps_estimate_avg=first_non_null(
-                coerce_float(calendar_data.get("Earnings Average")),
-                coerce_float(info.get("epsCurrentYear")),
-            ),
+            eps_estimate_avg=coerce_float(calendar_data.get("Earnings Average")),
             eps_estimate_high=first_non_null(
                 coerce_float(calendar_data.get("Earnings High")),
                 coerce_float(info.get("epsHigh")),
@@ -577,11 +574,7 @@ class YFinanceService:
             limitations.append("Recent analyst action history is unavailable from the data provider.")
 
         analyst_context = AnalystContext(
-            current_price_target=first_non_null(
-                coerce_float(price_targets.get("current")),
-                coerce_float(info.get("currentPrice")),
-                coerce_float(info.get("regularMarketPrice")),
-            ),
+            current_price_target=coerce_float(price_targets.get("current")),
             target_low=first_non_null(
                 coerce_float(price_targets.get("low")),
                 coerce_float(info.get("targetLowPrice")),
