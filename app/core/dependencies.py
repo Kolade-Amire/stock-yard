@@ -91,5 +91,13 @@ def get_chat_service() -> ChatService:
         max_tool_call_rounds=settings.chat_max_tool_call_rounds,
         history_recent_bars_limit=settings.chat_history_recent_bars_limit,
         news_tool_default_limit=settings.chat_news_tool_default_limit,
+        session_ttl_seconds=settings.chat_session_ttl_seconds,
+        session_max_tool_entries=settings.chat_session_max_tool_entries,
+        memo_ttl_overview_seconds=settings.cache_ttl_overview_seconds,
+        memo_ttl_history_seconds=settings.cache_ttl_history_seconds,
+        memo_ttl_news_seconds=settings.cache_ttl_news_seconds,
+        memo_ttl_financials_seconds=settings.cache_ttl_financials_seconds,
+        memo_ttl_earnings_seconds=settings.cache_ttl_earnings_seconds,
+        memo_ttl_analyst_seconds=settings.cache_ttl_analyst_seconds,
         tool_gating_mode=settings.chat_tool_gating_mode,
     )

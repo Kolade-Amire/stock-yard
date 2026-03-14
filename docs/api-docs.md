@@ -7,7 +7,7 @@ Frontend integration reference for the backend currently implemented in this rep
 - Base URL prefix: `/api/v1`
 - Auth: none
 - Content type: JSON for request and response bodies
-- Chat is stateless: the frontend must send prior conversation turns on each `/chat` request
+- Chat uses frontend-supplied conversation plus server-managed session memoization keyed by `sessionId`
 - Nullable fields: when data is unavailable, fields remain present and are returned as `null`
 - Structured errors: non-2xx responses use the shared error envelope documented below
 
@@ -21,8 +21,9 @@ Frontend integration reference for the backend currently implemented in this rep
   - ETF symbols often have sparse or empty statement, earnings, analyst, and ownership tables from Yahoo.
   - For those cases the backend returns either nullable fields plus `dataLimitations`, or `404 DATA_UNAVAILABLE` if there is no material usable dataset.
 - Chat conversation is frontend-supplied
-  - The backend does not persist chat history.
+  - The backend does not persist full chat transcripts.
   - The backend clips the provided conversation to the most recent configured turns before sending it to the model.
+  - The backend does memoize compact prior tool results server-side per `sessionId`.
 - Analytics rate limiting is in-process only
   - It is not shared across multiple app instances.
 - Chat tool usage is model-dependent
@@ -1053,6 +1054,7 @@ Ticker-scoped grounded chat endpoint.
 ```json
 {
   "symbol": "AAPL",
+  "sessionId": "chat-session-id",
   "message": "Given that outlook, what are the top near-term risks?",
   "conversation": [
     {
@@ -1070,6 +1072,9 @@ Ticker-scoped grounded chat endpoint.
 **Body fields**
 
 - `symbol` required
+- `sessionId` optional
+  - Omit it on the first turn.
+  - Reuse the returned value on follow-up turns for the same symbol.
 - `message` required, non-empty string
 - `conversation` optional array of prior turns
   - each turn:
@@ -1078,9 +1083,12 @@ Ticker-scoped grounded chat endpoint.
 
 **Behavior**
 
-- Backend is stateless and uses frontend-supplied conversation only.
+- Backend uses frontend-supplied conversation plus server-managed memoized tool state keyed by `sessionId`.
 - Prior conversation is clipped server-side before model invocation.
 - Tool grounding is restricted to the active ticker symbol.
+- If `sessionId` is omitted or unknown, the backend creates a new chat session and returns it.
+- If the frontend reuses a `sessionId` against a different symbol, the backend starts a new session and returns a new `sessionId`.
+- Cached session evidence may reduce repeated tool calls on follow-up turns, but `usedTools` still reports only tools called during the current request.
 - `usedTools` may be empty on a successful response.
 - Tool failures are usually converted into `limitations` instead of failing the whole request.
 - Internal chat tools include:
@@ -1088,15 +1096,18 @@ Ticker-scoped grounded chat endpoint.
   - `get_price_history`
   - `get_news_context`
   - `get_financial_summary`
-  - `get_earnings_context`
-  - `get_analyst_context`
-- `get_earnings_context` and `get_analyst_context` are internal chat tools only, not standalone public HTTP endpoints.
+  - `get_financial_trends_context`
+  - `get_earnings_deep_context`
+  - `get_analyst_deep_context`
+  - `get_ownership_context`
+- These are internal chat tools only, not standalone public HTTP endpoints.
 
 **Response shape**
 
 ```json
 {
   "symbol": "AAPL",
+  "sessionId": "chat-session-id",
   "answer": "AAPL still looks constructive near term, but the main risks are ...",
   "highlights": [
     "Upcoming earnings are a key catalyst.",
@@ -1105,7 +1116,7 @@ Ticker-scoped grounded chat endpoint.
   ],
   "usedTools": [
     "get_stock_snapshot",
-    "get_earnings_context",
+    "get_earnings_deep_context",
     "get_news_context"
   ],
   "limitations": [
@@ -1129,6 +1140,7 @@ curl -X POST "http://127.0.0.1:8000/api/v1/chat" \
   -H "Content-Type: application/json" \
   -d '{
     "symbol":"AAPL",
+    "sessionId":"chat-session-id",
     "message":"Given that thesis, has anything in the latest headlines or the upcoming earnings setup made the near-term case more fragile?",
     "conversation":[
       {"role":"user","content":"summarize near-term outlook."},

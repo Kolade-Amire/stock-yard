@@ -37,6 +37,18 @@ class Settings(BaseSettings):
         ge=1,
         le=10,
     )
+    chat_session_ttl_seconds: int = Field(
+        default=1800,
+        alias="CHAT_SESSION_TTL_SECONDS",
+        ge=1,
+        le=86400,
+    )
+    chat_session_max_tool_entries: int = Field(
+        default=16,
+        alias="CHAT_SESSION_MAX_TOOL_ENTRIES",
+        ge=1,
+        le=100,
+    )
     chat_tool_gating_mode: str = Field(
         default="balanced",
         alias="CHAT_TOOL_GATING_MODE",

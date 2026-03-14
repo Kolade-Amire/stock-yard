@@ -10,12 +10,14 @@ class ChatTurn(BaseModel):
 
 class ChatRequest(BaseModel):
     symbol: str
+    sessionId: str | None = None
     message: str = Field(min_length=1)
     conversation: list[ChatTurn] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
     symbol: str
+    sessionId: str
     answer: str
     highlights: list[str] = Field(default_factory=list)
     usedTools: list[str] = Field(default_factory=list)
