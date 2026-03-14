@@ -54,10 +54,17 @@ COMPACT_STOCK_SNAPSHOT_FIELDS = (
     "earnings_date",
     "is_etf",
 )
-SPECIFIC_INTENT_NAMES = ("price", "news", "financials", "earnings", "analyst")
-CONTEXT_INTENT_PRIORITY = ("earnings", "analyst", "financials", "news", "price")
+SPECIFIC_INTENT_NAMES = ("price", "news", "financials", "earnings", "analyst", "ownership")
+CONTEXT_INTENT_PRIORITY = ("earnings", "analyst", "financials", "ownership", "news", "price")
 NORMALIZE_PUNCTUATION_RE = re.compile(r"[^a-z0-9/\-\s]+")
 NORMALIZE_WHITESPACE_RE = re.compile(r"\s+")
+MAX_FINANCIAL_TREND_ANNUAL_POINTS = 4
+MAX_FINANCIAL_TREND_QUARTERLY_POINTS = 6
+MAX_EARNINGS_DEEP_EVENTS = 4
+MAX_EARNINGS_DEEP_ESTIMATE_POINTS = 4
+MAX_ANALYST_DEEP_ACTIONS = 5
+MAX_ANALYST_DEEP_HISTORY_POINTS = 4
+MAX_OWNERSHIP_CONTEXT_ROWS = 5
 
 
 @dataclass(frozen=True)
@@ -161,7 +168,7 @@ INTENT_CATALOG: dict[str, IntentDefinition] = {
             "margins",
         ),
         weak_terms=("profit", "profits", "cashflow", "multiple", "p/e", "pe"),
-        tools=("get_financial_summary", "get_stock_snapshot"),
+        tools=("get_financial_summary", "get_financial_trends_context", "get_stock_snapshot"),
     ),
     "earnings": IntentDefinition(
         strong_phrases=(
@@ -181,7 +188,7 @@ INTENT_CATALOG: dict[str, IntentDefinition] = {
             "report",
         ),
         weak_terms=("estimate", "estimates", "reported", "results"),
-        tools=("get_earnings_context",),
+        tools=("get_earnings_deep_context",),
     ),
     "analyst": IntentDefinition(
         strong_phrases=(
@@ -201,7 +208,29 @@ INTENT_CATALOG: dict[str, IntentDefinition] = {
             "downgrades",
         ),
         weak_terms=("target", "targets", "rating", "ratings", "upgrade", "downgrade"),
-        tools=("get_analyst_context",),
+        tools=("get_analyst_deep_context",),
+    ),
+    "ownership": IntentDefinition(
+        strong_phrases=(
+            "major holders",
+            "mutual fund holders",
+            "institutional holders",
+            "insider roster",
+        ),
+        strong_terms=(
+            "ownership",
+            "holders",
+            "holder",
+            "institutional",
+            "institutions",
+            "owns",
+            "owned",
+            "exposure",
+            "insider",
+            "insiders",
+        ),
+        weak_terms=("mutual", "fund", "owned", "ownership", "holding", "holdings"),
+        tools=("get_ownership_context",),
     ),
     "general_outlook": IntentDefinition(
         strong_phrases=(
@@ -570,10 +599,14 @@ class ChatService:
                 return await self._tool_get_news_context(active_symbol, arguments)
             if tool_name == "get_financial_summary":
                 return await self._tool_get_financial_summary(active_symbol)
-            if tool_name == "get_earnings_context":
-                return await self._tool_get_earnings_context(active_symbol)
-            if tool_name == "get_analyst_context":
-                return await self._tool_get_analyst_context(active_symbol)
+            if tool_name == "get_financial_trends_context":
+                return await self._tool_get_financial_trends_context(active_symbol)
+            if tool_name == "get_earnings_deep_context":
+                return await self._tool_get_earnings_deep_context(active_symbol)
+            if tool_name == "get_analyst_deep_context":
+                return await self._tool_get_analyst_deep_context(active_symbol)
+            if tool_name == "get_ownership_context":
+                return await self._tool_get_ownership_context(active_symbol)
         except ApiError as exc:
             self._logger.warning("Tool %s failed with %s", tool_name, exc.code)
             return (
@@ -677,23 +710,115 @@ class ChatService:
         }
         return payload, summary.dataLimitations
 
-    async def _tool_get_earnings_context(self, symbol: str) -> tuple[dict[str, Any], list[str]]:
-        earnings_context = await self._yfinance_service.get_earnings_context(symbol)
+    async def _tool_get_financial_trends_context(
+        self,
+        symbol: str,
+    ) -> tuple[dict[str, Any], list[str]]:
+        trends = await self._yfinance_service.get_financial_trends(symbol)
+        annual_points = self._compact_financial_trend_points(
+            trends.annual[-MAX_FINANCIAL_TREND_ANNUAL_POINTS :]
+        )
+        quarterly_points = self._compact_financial_trend_points(
+            trends.quarterly[-MAX_FINANCIAL_TREND_QUARTERLY_POINTS :]
+        )
         payload = {
-            "symbol": earnings_context.symbol,
-            "earningsContext": earnings_context.earningsContext.model_dump(),
-            "dataLimitations": earnings_context.dataLimitations,
+            "symbol": trends.symbol,
+            "annual": annual_points,
+            "quarterly": quarterly_points,
+            "annualSummary": self._summarize_financial_trends(annual_points),
+            "quarterlySummary": self._summarize_financial_trends(quarterly_points),
+            "dataLimitations": trends.dataLimitations,
         }
-        return payload, earnings_context.dataLimitations
+        return payload, trends.dataLimitations
 
-    async def _tool_get_analyst_context(self, symbol: str) -> tuple[dict[str, Any], list[str]]:
-        analyst_context = await self._yfinance_service.get_analyst_context(symbol)
+    async def _tool_get_earnings_deep_context(self, symbol: str) -> tuple[dict[str, Any], list[str]]:
+        earnings_context = await self._yfinance_service.get_earnings_context(symbol)
+        earnings_history = await self._yfinance_service.get_earnings_history(symbol)
+        earnings_estimates = await self._yfinance_service.get_earnings_estimates(symbol)
+        recent_events = self._compact_earnings_history_events(
+            earnings_history.events[-MAX_EARNINGS_DEEP_EVENTS :]
+        )
         payload = {
-            "symbol": analyst_context.symbol,
-            "analystContext": analyst_context.analystContext.model_dump(),
-            "dataLimitations": analyst_context.dataLimitations,
+            "symbol": symbol,
+            "nextEarningsDate": earnings_context.earningsContext.next_earnings_date,
+            "earningsDateCandidates": earnings_context.earningsContext.earnings_date_candidates,
+            "recentSurprises": recent_events,
+            "epsEstimates": self._compact_earnings_estimate_points(
+                earnings_estimates.epsEstimates[:MAX_EARNINGS_DEEP_ESTIMATE_POINTS]
+            ),
+            "revenueEstimates": self._compact_revenue_estimate_points(
+                earnings_estimates.revenueEstimates[:MAX_EARNINGS_DEEP_ESTIMATE_POINTS]
+            ),
+            "growthEstimates": self._compact_growth_estimate_points(
+                earnings_estimates.growthEstimates[:MAX_EARNINGS_DEEP_ESTIMATE_POINTS]
+            ),
+            "dataLimitations": self._dedupe_preserve_order(
+                [
+                    *earnings_context.dataLimitations,
+                    *earnings_history.dataLimitations,
+                    *earnings_estimates.dataLimitations,
+                ]
+            ),
         }
-        return payload, analyst_context.dataLimitations
+        return payload, payload["dataLimitations"]
+
+    async def _tool_get_analyst_deep_context(self, symbol: str) -> tuple[dict[str, Any], list[str]]:
+        analyst_context = await self._yfinance_service.get_analyst_context(symbol)
+        analyst_summary = await self._yfinance_service.get_analyst_summary(symbol)
+        analyst_history = await self._yfinance_service.get_analyst_history(symbol)
+        payload = {
+            "symbol": symbol,
+            "currentTargets": {
+                "currentPriceTarget": analyst_summary.analystSummary.currentPriceTarget,
+                "targetLow": analyst_summary.analystSummary.targetLow,
+                "targetHigh": analyst_summary.analystSummary.targetHigh,
+                "targetMean": analyst_summary.analystSummary.targetMean,
+                "targetMedian": analyst_summary.analystSummary.targetMedian,
+            },
+            "recommendationSummary": analyst_summary.analystSummary.recommendationSummary.model_dump(),
+            "recentActionCount": analyst_summary.analystSummary.recentActionCount,
+            "recentActionWindowDays": analyst_summary.analystSummary.recentActionWindowDays,
+            "recentActions": self._compact_analyst_actions(
+                analyst_context.analystContext.recent_actions[:MAX_ANALYST_DEEP_ACTIONS]
+            ),
+            "recommendationHistory": self._compact_recommendation_history(
+                analyst_history.recommendationHistory[-MAX_ANALYST_DEEP_HISTORY_POINTS :]
+            ),
+            "actionTimeline": self._compact_analyst_timeline_actions(
+                analyst_history.actions[:MAX_ANALYST_DEEP_ACTIONS]
+            ),
+            "dataLimitations": self._dedupe_preserve_order(
+                [
+                    *analyst_context.dataLimitations,
+                    *analyst_summary.dataLimitations,
+                    *analyst_history.dataLimitations,
+                ]
+            ),
+        }
+        return payload, payload["dataLimitations"]
+
+    async def _tool_get_ownership_context(self, symbol: str) -> tuple[dict[str, Any], list[str]]:
+        ownership = await self._yfinance_service.get_ticker_ownership(
+            symbol=symbol,
+            section="all",
+            limit=MAX_OWNERSHIP_CONTEXT_ROWS,
+            offset=0,
+        )
+        payload = {
+            "symbol": ownership.symbol,
+            "majorHolders": [metric.model_dump() for metric in ownership.majorHolders],
+            "institutionalHolders": [
+                holder.model_dump() for holder in ownership.institutionalHolders[:MAX_OWNERSHIP_CONTEXT_ROWS]
+            ],
+            "mutualFundHolders": [
+                holder.model_dump() for holder in ownership.mutualFundHolders[:MAX_OWNERSHIP_CONTEXT_ROWS]
+            ],
+            "insiderRoster": [
+                insider.model_dump() for insider in ownership.insiderRoster[:MAX_OWNERSHIP_CONTEXT_ROWS]
+            ],
+            "dataLimitations": ownership.dataLimitations,
+        }
+        return payload, ownership.dataLimitations
 
     def _parse_structured_answer(self, response: LLMModelResponse) -> StructuredChatAnswer:
         raw_payload = response.parsed
@@ -783,8 +908,8 @@ class ChatService:
                 },
             ),
             ToolSpec(
-                name="get_earnings_context",
-                description="Fetches normalized earnings-date and estimate context with limitations.",
+                name="get_financial_trends_context",
+                description="Fetches compact annual and quarterly financial trend context with derived summaries.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -794,8 +919,30 @@ class ChatService:
                 },
             ),
             ToolSpec(
-                name="get_analyst_context",
-                description="Fetches analyst target, recommendation, and recent action context.",
+                name="get_earnings_deep_context",
+                description="Fetches compact earnings date, surprise history, and estimate trend context.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
+                name="get_analyst_deep_context",
+                description="Fetches compact analyst target, recommendation, and recent action history context.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
+                name="get_ownership_context",
+                description="Fetches compact ownership context including major holders, institutions, funds, and insiders.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -829,6 +976,128 @@ class ChatService:
             }
             for item in news_items
         ]
+
+    @staticmethod
+    def _compact_financial_trend_points(points: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "periodEnd": point.periodEnd,
+                "revenue": point.revenue,
+                "netIncome": point.netIncome,
+                "operatingCashFlow": point.operatingCashFlow,
+                "capitalExpenditure": point.capitalExpenditure,
+                "freeCashFlow": point.freeCashFlow,
+            }
+            for point in points
+        ]
+
+    @staticmethod
+    def _summarize_financial_trends(points: list[dict[str, Any]]) -> dict[str, Any]:
+        if len(points) < 2:
+            return {
+                "pointCount": len(points),
+                "latestPeriodEnd": points[-1]["periodEnd"] if points else None,
+                "revenueDelta": None,
+                "netIncomeDelta": None,
+                "freeCashFlowDelta": None,
+            }
+
+        latest = points[-1]
+        previous = points[-2]
+        return {
+            "pointCount": len(points),
+            "latestPeriodEnd": latest["periodEnd"],
+            "revenueDelta": ChatService._delta_or_none(previous["revenue"], latest["revenue"]),
+            "netIncomeDelta": ChatService._delta_or_none(previous["netIncome"], latest["netIncome"]),
+            "freeCashFlowDelta": ChatService._delta_or_none(
+                previous["freeCashFlow"],
+                latest["freeCashFlow"],
+            ),
+        }
+
+    @staticmethod
+    def _compact_earnings_history_events(events: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "reportDate": event.reportDate,
+                "quarter": event.quarter,
+                "epsEstimate": event.epsEstimate,
+                "epsActual": event.epsActual,
+                "surprisePercent": event.surprisePercent,
+            }
+            for event in events
+        ]
+
+    @staticmethod
+    def _compact_earnings_estimate_points(points: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "period": point.period,
+                "avg": point.avg,
+                "low": point.low,
+                "high": point.high,
+                "yearAgoEps": point.yearAgoEps,
+                "numberOfAnalysts": point.numberOfAnalysts,
+                "growth": point.growth,
+            }
+            for point in points
+        ]
+
+    @staticmethod
+    def _compact_revenue_estimate_points(points: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "period": point.period,
+                "avg": point.avg,
+                "low": point.low,
+                "high": point.high,
+                "numberOfAnalysts": point.numberOfAnalysts,
+                "yearAgoRevenue": point.yearAgoRevenue,
+                "growth": point.growth,
+            }
+            for point in points
+        ]
+
+    @staticmethod
+    def _compact_growth_estimate_points(points: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "period": point.period,
+                "stockTrend": point.stockTrend,
+                "indexTrend": point.indexTrend,
+            }
+            for point in points
+        ]
+
+    @staticmethod
+    def _compact_analyst_actions(actions: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "gradedAt": action.graded_at,
+                "firm": action.firm,
+                "toGrade": action.to_grade,
+                "fromGrade": action.from_grade,
+                "action": action.action,
+                "priceTargetAction": action.price_target_action,
+                "currentPriceTarget": action.current_price_target,
+                "priorPriceTarget": action.prior_price_target,
+            }
+            for action in actions
+        ]
+
+    @staticmethod
+    def _compact_recommendation_history(history: list[Any]) -> list[dict[str, Any]]:
+        return [item.model_dump() for item in history]
+
+    @staticmethod
+    def _compact_analyst_timeline_actions(actions: list[Any]) -> list[dict[str, Any]]:
+        return [item.model_dump() for item in actions]
+
+    @staticmethod
+    def _delta_or_none(previous: float | None, current: float | None) -> float | None:
+        if previous is None or current is None:
+            return None
+        return current - previous
 
     @staticmethod
     def _summarize_history(bars: list[PriceBar]) -> dict[str, Any]:
