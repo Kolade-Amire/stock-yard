@@ -6,7 +6,7 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
-from app.api.routers import analytics, chat, health, tickers
+from app.api.routers import analytics, chat, health, market, tickers
 from app.core.config import get_settings
 from app.core.errors import ApiError
 from app.core.logging import configure_logging, get_logger
@@ -77,5 +77,6 @@ async def unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
 
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(tickers.router, prefix=settings.api_prefix)
+app.include_router(market.router, prefix=settings.api_prefix)
 app.include_router(analytics.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)

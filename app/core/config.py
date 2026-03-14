@@ -61,6 +61,22 @@ class Settings(BaseSettings):
         default=900,
         alias="CACHE_TTL_NEWS_SECONDS",
     )
+    cache_ttl_movers_seconds: int = Field(
+        default=120,
+        alias="CACHE_TTL_MOVERS_SECONDS",
+    )
+    cache_ttl_benchmarks_seconds: int = Field(
+        default=1800,
+        alias="CACHE_TTL_BENCHMARKS_SECONDS",
+    )
+    cache_ttl_earnings_calendar_seconds: int = Field(
+        default=300,
+        alias="CACHE_TTL_EARNINGS_CALENDAR_SECONDS",
+    )
+    cache_ttl_sectors_seconds: int = Field(
+        default=3600,
+        alias="CACHE_TTL_SECTORS_SECONDS",
+    )
     cache_ttl_financials_seconds: int = Field(
         default=3600,
         alias="CACHE_TTL_FINANCIALS_SECONDS",

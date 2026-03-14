@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from math import isfinite
 from typing import Any
 
@@ -26,6 +26,23 @@ from app.schemas.ticker import (
     TickerSearchResponse,
     TickerSearchResult,
 )
+from app.schemas.market import (
+    BenchmarkFund,
+    BenchmarkFundsResponse,
+    BenchmarkHolding,
+    BenchmarkSectorWeight,
+    EarningsCalendarEvent,
+    EarningsCalendarResponse,
+    MarketMover,
+    MarketMoversResponse,
+    SectorCompanyReference,
+    SectorDetailResponse,
+    SectorFundReference,
+    SectorIndustryReference,
+    SectorOverview,
+    SectorPulseItem,
+    SectorPulseResponse,
+)
 from app.utils.cache import TTLCache
 from app.utils.mappers import (
     coerce_bool,
@@ -38,6 +55,71 @@ from app.utils.mappers import (
 from app.utils.symbols import is_valid_symbol, normalize_query, normalize_symbol
 
 ALLOWED_QUOTE_TYPES = {"EQUITY", "ETF"}
+MARKET_SCOPE_US = "us"
+DEFAULT_MOVERS_LIMIT = 10
+MAX_MOVERS_LIMIT = 25
+DEFAULT_EARNINGS_CALENDAR_LIMIT = 25
+MAX_EARNINGS_CALENDAR_LIMIT = 100
+MAX_BENCHMARK_HOLDINGS = 5
+MAX_BENCHMARK_SECTOR_WEIGHTS = 5
+MAX_SECTOR_PULSE_FUNDS = 3
+MAX_SECTOR_PULSE_COMPANIES = 3
+ALLOWED_MOVER_SCREENS: dict[str, str] = {
+    "gainers": "day_gainers",
+    "losers": "day_losers",
+    "most_active": "most_actives",
+}
+CURATED_BENCHMARK_FUNDS: tuple[dict[str, str], ...] = (
+    {
+        "symbol": "SPY",
+        "benchmarkKey": "sp500",
+        "benchmarkName": "S&P 500",
+        "category": "large_cap_us",
+    },
+    {
+        "symbol": "QQQ",
+        "benchmarkKey": "nasdaq100",
+        "benchmarkName": "Nasdaq-100",
+        "category": "large_cap_growth_us",
+    },
+    {
+        "symbol": "DIA",
+        "benchmarkKey": "dow30",
+        "benchmarkName": "Dow Jones Industrial Average",
+        "category": "large_cap_value_us",
+    },
+    {
+        "symbol": "IWM",
+        "benchmarkKey": "russell2000",
+        "benchmarkName": "Russell 2000",
+        "category": "small_cap_us",
+    },
+    {
+        "symbol": "VTI",
+        "benchmarkKey": "total_us_market",
+        "benchmarkName": "Total US Stock Market",
+        "category": "broad_market_us",
+    },
+    {
+        "symbol": "BND",
+        "benchmarkKey": "us_aggregate_bond",
+        "benchmarkName": "US Aggregate Bond",
+        "category": "bonds_us",
+    },
+)
+CURATED_SECTOR_KEYS = (
+    "basic-materials",
+    "communication-services",
+    "consumer-cyclical",
+    "consumer-defensive",
+    "energy",
+    "financial-services",
+    "healthcare",
+    "industrials",
+    "real-estate",
+    "technology",
+    "utilities",
+)
 MAX_NEWS_LIMIT = 50
 EARNINGS_DATES_LIMIT = 8
 ANALYST_ACTION_WINDOW_DAYS = 90
@@ -62,6 +144,10 @@ class YFinanceService:
         cache_ttl_overview_seconds: int,
         cache_ttl_history_seconds: int,
         cache_ttl_news_seconds: int,
+        cache_ttl_movers_seconds: int,
+        cache_ttl_benchmarks_seconds: int,
+        cache_ttl_earnings_calendar_seconds: int,
+        cache_ttl_sectors_seconds: int,
         cache_ttl_financials_seconds: int,
         cache_ttl_earnings_seconds: int,
         cache_ttl_analyst_seconds: int,
@@ -70,6 +156,13 @@ class YFinanceService:
         self._overview_cache = TTLCache[TickerOverviewResponse](cache_ttl_overview_seconds)
         self._history_cache = TTLCache[TickerHistoryResponse](cache_ttl_history_seconds)
         self._news_cache = TTLCache[TickerNewsResponse](cache_ttl_news_seconds)
+        self._movers_cache = TTLCache[MarketMoversResponse](cache_ttl_movers_seconds)
+        self._benchmarks_cache = TTLCache[BenchmarkFundsResponse](cache_ttl_benchmarks_seconds)
+        self._earnings_calendar_cache = TTLCache[EarningsCalendarResponse](
+            cache_ttl_earnings_calendar_seconds
+        )
+        self._sector_pulse_cache = TTLCache[SectorPulseResponse](cache_ttl_sectors_seconds)
+        self._sector_detail_cache = TTLCache[SectorDetailResponse](cache_ttl_sectors_seconds)
         self._financial_summary_cache = TTLCache[FinancialSummaryResponse](
             cache_ttl_financials_seconds
         )
@@ -114,6 +207,90 @@ class YFinanceService:
             bounded_limit,
         )
         self._news_cache.set(cache_key, response)
+        return response
+
+    async def get_market_movers(self, screen: str, limit: int = DEFAULT_MOVERS_LIMIT) -> MarketMoversResponse:
+        normalized_screen = self._normalize_and_validate_mover_screen(screen)
+        bounded_limit = self._normalize_and_validate_mover_limit(limit)
+
+        cache_key = f"{normalized_screen}:{bounded_limit}"
+        cached = self._movers_cache.get(cache_key)
+        if cached is not None:
+            self._logger.info("Movers cache hit for %s", cache_key)
+            return cached
+
+        response = await run_in_threadpool(
+            self._get_market_movers_sync,
+            normalized_screen,
+            bounded_limit,
+        )
+        self._movers_cache.set(cache_key, response)
+        return response
+
+    async def get_benchmark_funds(self) -> BenchmarkFundsResponse:
+        cache_key = MARKET_SCOPE_US
+        cached = self._benchmarks_cache.get(cache_key)
+        if cached is not None:
+            self._logger.info("Benchmarks cache hit for %s", cache_key)
+            return cached
+
+        response = await run_in_threadpool(self._get_benchmark_funds_sync)
+        self._benchmarks_cache.set(cache_key, response)
+        return response
+
+    async def get_earnings_calendar(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = DEFAULT_EARNINGS_CALENDAR_LIMIT,
+        active_only: bool = True,
+    ) -> EarningsCalendarResponse:
+        normalized_start, normalized_end = self._normalize_earnings_calendar_range(
+            start=start,
+            end=end,
+        )
+        bounded_limit = self._normalize_and_validate_earnings_calendar_limit(limit)
+
+        cache_key = (
+            f"{normalized_start.isoformat()}:{normalized_end.isoformat()}:"
+            f"{bounded_limit}:{int(active_only)}"
+        )
+        cached = self._earnings_calendar_cache.get(cache_key)
+        if cached is not None:
+            self._logger.info("Earnings calendar cache hit for %s", cache_key)
+            return cached
+
+        response = await run_in_threadpool(
+            self._get_earnings_calendar_sync,
+            normalized_start,
+            normalized_end,
+            bounded_limit,
+            active_only,
+        )
+        self._earnings_calendar_cache.set(cache_key, response)
+        return response
+
+    async def get_sector_pulse(self) -> SectorPulseResponse:
+        cache_key = MARKET_SCOPE_US
+        cached = self._sector_pulse_cache.get(cache_key)
+        if cached is not None:
+            self._logger.info("Sector pulse cache hit for %s", cache_key)
+            return cached
+
+        response = await run_in_threadpool(self._get_sector_pulse_sync)
+        self._sector_pulse_cache.set(cache_key, response)
+        return response
+
+    async def get_sector_detail(self, *, sector_key: str) -> SectorDetailResponse:
+        normalized_key = self._normalize_and_validate_sector_key(sector_key)
+        cached = self._sector_detail_cache.get(normalized_key)
+        if cached is not None:
+            self._logger.info("Sector detail cache hit for %s", normalized_key)
+            return cached
+
+        response = await run_in_threadpool(self._build_sector_detail_sync, normalized_key)
+        self._sector_detail_cache.set(normalized_key, response)
         return response
 
     async def get_financial_summary(self, symbol: str) -> FinancialSummaryResponse:
@@ -199,6 +376,108 @@ class YFinanceService:
             )
         return normalized_symbol
 
+    @staticmethod
+    def _normalize_and_validate_mover_screen(screen: str) -> str:
+        normalized_screen = screen.strip().lower()
+        if normalized_screen not in ALLOWED_MOVER_SCREENS:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message="Unsupported market movers screen.",
+                status_code=400,
+                details={
+                    "screen": screen,
+                    "allowedScreens": sorted(ALLOWED_MOVER_SCREENS.keys()),
+                },
+            )
+        return normalized_screen
+
+    @staticmethod
+    def _normalize_and_validate_mover_limit(limit: int) -> int:
+        if limit < 1 or limit > MAX_MOVERS_LIMIT:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message="Market movers limit is outside the supported range.",
+                status_code=400,
+                details={
+                    "limit": limit,
+                    "minLimit": 1,
+                    "maxLimit": MAX_MOVERS_LIMIT,
+                },
+            )
+        return limit
+
+    @staticmethod
+    def _normalize_and_validate_sector_key(sector_key: str) -> str:
+        normalized_key = sector_key.strip().lower()
+        if normalized_key not in CURATED_SECTOR_KEYS:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message="Unsupported sector key.",
+                status_code=400,
+                details={
+                    "sectorKey": sector_key,
+                    "allowedSectorKeys": sorted(CURATED_SECTOR_KEYS),
+                },
+            )
+        return normalized_key
+
+    def _normalize_earnings_calendar_range(
+        self,
+        *,
+        start: str | None,
+        end: str | None,
+    ) -> tuple[date, date]:
+        normalized_start = self._parse_iso_date(value=start, field_name="start") if start else date.today()
+        normalized_end = (
+            self._parse_iso_date(value=end, field_name="end")
+            if end
+            else normalized_start + timedelta(days=7)
+        )
+
+        if normalized_end < normalized_start:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message="Earnings calendar end date cannot be earlier than start date.",
+                status_code=400,
+                details={
+                    "start": normalized_start.isoformat(),
+                    "end": normalized_end.isoformat(),
+                },
+            )
+
+        return normalized_start, normalized_end
+
+    @staticmethod
+    def _parse_iso_date(*, value: str, field_name: str) -> date:
+        try:
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message="Invalid earnings calendar date format.",
+                status_code=400,
+                details={
+                    "field": field_name,
+                    "value": value,
+                    "expectedFormat": "YYYY-MM-DD",
+                },
+            ) from exc
+
+    @staticmethod
+    def _normalize_and_validate_earnings_calendar_limit(limit: int) -> int:
+        if limit < 1 or limit > MAX_EARNINGS_CALENDAR_LIMIT:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message="Earnings calendar limit is outside the supported range.",
+                status_code=400,
+                details={
+                    "limit": limit,
+                    "minLimit": 1,
+                    "maxLimit": MAX_EARNINGS_CALENDAR_LIMIT,
+                },
+            )
+        return limit
+
     def _validate_history_period_interval(
         self,
         *,
@@ -262,6 +541,976 @@ class YFinanceService:
                 break
 
         return TickerSearchResponse(query=query, results=results)
+
+    def _get_market_movers_sync(self, screen: str, limit: int) -> MarketMoversResponse:
+        provider_screen = ALLOWED_MOVER_SCREENS[screen]
+        try:
+            payload = yf.screen(provider_screen, count=limit)
+        except Exception as exc:
+            self._logger.exception("yfinance movers fetch failed", exc_info=exc)
+            raise ApiError(
+                code="PROVIDER_ERROR",
+                message="Failed to fetch market movers from market data provider.",
+                status_code=502,
+                details={"screen": screen},
+            ) from exc
+
+        quotes = self._extract_mover_quotes(payload)
+        movers: list[MarketMover] = []
+        skipped_rows = 0
+        for quote in quotes:
+            mover = self._map_market_mover(quote)
+            if mover is None:
+                skipped_rows += 1
+                continue
+            movers.append(mover)
+            if len(movers) >= limit:
+                break
+
+        if not movers:
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Market movers data is unavailable for the selected screen.",
+                status_code=404,
+                details={"screen": screen},
+            )
+
+        limitations: list[str] = []
+        if skipped_rows > 0:
+            limitations.append(
+                f"{skipped_rows} market mover entries were omitted because provider fields were incomplete."
+            )
+
+        return MarketMoversResponse(
+            screen=screen,
+            marketScope=MARKET_SCOPE_US,
+            asOf=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            results=movers,
+            dataLimitations=limitations,
+        )
+
+    @staticmethod
+    def _extract_mover_quotes(payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, Mapping):
+            return []
+        raw_quotes = payload.get("quotes")
+        if not isinstance(raw_quotes, list):
+            raw_quotes = payload.get("items")
+        if not isinstance(raw_quotes, list):
+            return []
+        return [item for item in raw_quotes if isinstance(item, dict)]
+
+    def _map_market_mover(self, quote: dict[str, Any]) -> MarketMover | None:
+        raw_symbol = coerce_str(quote.get("symbol"))
+        if raw_symbol is None:
+            return None
+
+        symbol = normalize_symbol(raw_symbol)
+        if not is_valid_symbol(symbol):
+            return None
+
+        quote_type = first_non_null(
+            coerce_str(quote.get("quoteType")),
+            coerce_str(quote.get("quote_type")),
+        )
+        normalized_quote_type = quote_type.upper() if quote_type else None
+
+        current_price = first_non_null(
+            coerce_float(quote.get("regularMarketPrice")),
+            coerce_float(quote.get("intradayprice")),
+            coerce_float(quote.get("price")),
+        )
+        change = first_non_null(
+            coerce_float(quote.get("regularMarketChange")),
+            coerce_float(quote.get("change")),
+        )
+        percent_change = first_non_null(
+            coerce_float(quote.get("regularMarketChangePercent")),
+            coerce_float(quote.get("percentchange")),
+            coerce_float(quote.get("percentChange")),
+        )
+        volume = first_non_null(
+            coerce_int(quote.get("regularMarketVolume")),
+            coerce_int(quote.get("dayvolume")),
+            coerce_int(quote.get("volume")),
+        )
+        market_cap = first_non_null(
+            coerce_float(quote.get("marketCap")),
+            coerce_float(quote.get("intradaymarketcap")),
+        )
+
+        if all(
+            value is None
+            for value in (current_price, change, percent_change, volume, market_cap)
+        ):
+            return None
+
+        return MarketMover(
+            symbol=symbol,
+            name=first_non_null(
+                coerce_str(quote.get("shortName")),
+                coerce_str(quote.get("longName")),
+                coerce_str(quote.get("displayName")),
+                symbol,
+            ),
+            exchange=first_non_null(
+                coerce_str(quote.get("exchange")),
+                coerce_str(quote.get("fullExchangeName")),
+                coerce_str(quote.get("exchangeName")),
+            ),
+            quoteType=normalized_quote_type,
+            currentPrice=current_price,
+            change=change,
+            percentChange=percent_change,
+            volume=volume,
+            marketCap=market_cap,
+        )
+
+    def _get_benchmark_funds_sync(self) -> BenchmarkFundsResponse:
+        benchmark_funds: list[BenchmarkFund] = []
+        top_level_limitations: list[str] = []
+
+        for benchmark in CURATED_BENCHMARK_FUNDS:
+            symbol = benchmark["symbol"]
+            try:
+                mapped_fund = self._build_benchmark_fund(
+                    symbol=symbol,
+                    benchmark_key=benchmark["benchmarkKey"],
+                    benchmark_name=benchmark["benchmarkName"],
+                    category=benchmark["category"],
+                )
+            except ApiError as exc:
+                self._logger.warning("Skipping benchmark fund %s: %s", symbol, exc.message)
+                top_level_limitations.append(
+                    f"{symbol} benchmark fund data is unavailable from the data provider."
+                )
+                continue
+            except Exception as exc:
+                self._logger.warning("Unexpected benchmark fund failure for %s: %s", symbol, exc)
+                top_level_limitations.append(
+                    f"{symbol} benchmark fund data is unavailable due to a provider parsing error."
+                )
+                continue
+
+            benchmark_funds.append(mapped_fund)
+
+        if not benchmark_funds:
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Benchmark fund data is unavailable.",
+                status_code=404,
+                details={"marketScope": MARKET_SCOPE_US},
+            )
+
+        omitted_count = len(CURATED_BENCHMARK_FUNDS) - len(benchmark_funds)
+        if omitted_count > 0:
+            top_level_limitations.insert(
+                0,
+                f"{omitted_count} benchmark funds were omitted because provider data was unavailable.",
+            )
+
+        return BenchmarkFundsResponse(
+            asOf=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            funds=benchmark_funds,
+            dataLimitations=self._dedupe_preserve_order(top_level_limitations),
+        )
+
+    def _build_benchmark_fund(
+        self,
+        *,
+        symbol: str,
+        benchmark_key: str,
+        benchmark_name: str,
+        category: str,
+    ) -> BenchmarkFund:
+        try:
+            ticker = yf.Ticker(symbol)
+        except Exception as exc:
+            self._logger.exception("yfinance benchmark ticker init failed", exc_info=exc)
+            raise ApiError(
+                code="PROVIDER_ERROR",
+                message="Failed to initialize benchmark fund from market data provider.",
+                status_code=502,
+                details={"symbol": symbol},
+            ) from exc
+
+        limitations: list[str] = []
+
+        info: dict[str, Any] = {}
+        fast_info: dict[str, Any] = {}
+        funds_data: Any = None
+
+        try:
+            info = self._coerce_mapping(getattr(ticker, "info", {}))
+        except Exception as exc:
+            self._logger.warning("Benchmark info fetch failed for %s: %s", symbol, exc)
+            limitations.append("Quote metadata is unavailable from the data provider.")
+
+        try:
+            fast_info = self._coerce_mapping(getattr(ticker, "fast_info", {}))
+        except Exception as exc:
+            self._logger.warning("Benchmark fast_info fetch failed for %s: %s", symbol, exc)
+            limitations.append("Fast quote data is unavailable from the data provider.")
+
+        try:
+            funds_data = getattr(ticker, "funds_data", None)
+        except Exception as exc:
+            self._logger.warning("Benchmark funds_data fetch failed for %s: %s", symbol, exc)
+            limitations.append("Fund profile details are unavailable from the data provider.")
+
+        fund_overview: dict[str, Any] = {}
+        fund_operations: Any = None
+        raw_top_holdings: Any = None
+        raw_sector_weightings: Any = None
+
+        if funds_data is not None:
+            fund_overview = self._safe_get_mapping_attr(
+                funds_data,
+                "fund_overview",
+                symbol=symbol,
+                limitations=limitations,
+                failure_message="Fund overview details are unavailable from the data provider.",
+            )
+            fund_operations = self._safe_get_attr(
+                funds_data,
+                "fund_operations",
+                symbol=symbol,
+                limitations=limitations,
+                failure_message="Fund operations data is unavailable from the data provider.",
+            )
+            raw_top_holdings = self._safe_get_attr(
+                funds_data,
+                "top_holdings",
+                symbol=symbol,
+                limitations=limitations,
+                failure_message="Top holdings are unavailable from the data provider.",
+            )
+            raw_sector_weightings = self._safe_get_attr(
+                funds_data,
+                "sector_weightings",
+                symbol=symbol,
+                limitations=limitations,
+                failure_message="Sector weights are unavailable from the data provider.",
+            )
+
+        current_price = first_non_null(
+            coerce_float(fast_info.get("lastPrice")),
+            coerce_float(info.get("currentPrice")),
+            coerce_float(info.get("regularMarketPrice")),
+        )
+        previous_close = first_non_null(
+            coerce_float(fast_info.get("previousClose")),
+            coerce_float(info.get("previousClose")),
+            coerce_float(info.get("regularMarketPreviousClose")),
+        )
+        day_change = first_non_null(
+            coerce_float(info.get("regularMarketChange")),
+            current_price - previous_close
+            if current_price is not None and previous_close is not None
+            else None,
+        )
+        day_change_percent = first_non_null(
+            coerce_float(info.get("regularMarketChangePercent")),
+            ((day_change / previous_close) * 100)
+            if day_change is not None and previous_close not in (None, 0)
+            else None,
+        )
+
+        top_holdings = self._map_benchmark_holdings(raw_top_holdings)
+        sector_weights = self._map_benchmark_sector_weights(raw_sector_weightings)
+        expense_ratio = first_non_null(
+            self._coerce_positive_float(
+                self._extract_fund_operation_value(
+                    fund_operations,
+                    row_label="Annual Report Expense Ratio",
+                    symbol=symbol,
+                )
+            ),
+            self._coerce_positive_float(coerce_float(info.get("annualReportExpenseRatio"))),
+            self._coerce_percentage_basis_points(info.get("netExpenseRatio")),
+        )
+        net_assets = first_non_null(
+            self._coerce_positive_float(coerce_float(info.get("totalAssets"))),
+            self._coerce_positive_float(coerce_float(info.get("netAssets"))),
+            self._coerce_positive_float(
+                self._extract_fund_operation_value(
+                    fund_operations,
+                    row_label="Total Net Assets",
+                    symbol=symbol,
+                )
+            ),
+        )
+
+        benchmark_fund = BenchmarkFund(
+            symbol=symbol,
+            benchmarkKey=benchmark_key,
+            benchmarkName=benchmark_name,
+            category=category,
+            displayName=first_non_null(
+                coerce_str(info.get("longName")),
+                coerce_str(info.get("shortName")),
+                coerce_str(info.get("displayName")),
+                symbol,
+            ),
+            currentPrice=current_price,
+            previousClose=previous_close,
+            dayChange=day_change,
+            dayChangePercent=day_change_percent,
+            currency=first_non_null(
+                coerce_str(info.get("currency")),
+                coerce_str(fast_info.get("currency")),
+            ),
+            expenseRatio=expense_ratio,
+            netAssets=net_assets,
+            yield_=first_non_null(
+                coerce_float(info.get("yield")),
+                coerce_float(info.get("trailingAnnualDividendYield")),
+            ),
+            fundFamily=first_non_null(
+                coerce_str(fund_overview.get("family")),
+                coerce_str(info.get("fundFamily")),
+            ),
+            topHoldings=top_holdings,
+            sectorWeights=sector_weights,
+            dataLimitations=[],
+        )
+
+        if self._benchmark_fund_has_no_material_data(benchmark_fund):
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Benchmark fund data is unavailable.",
+                status_code=404,
+                details={"symbol": symbol},
+            )
+
+        if benchmark_fund.currentPrice is None:
+            limitations.append("Current price is unavailable from the data provider.")
+        if benchmark_fund.expenseRatio is None:
+            limitations.append("Expense ratio is unavailable from the data provider.")
+        if benchmark_fund.netAssets is None:
+            limitations.append("Net assets are unavailable from the data provider.")
+        if benchmark_fund.fundFamily is None:
+            limitations.append("Fund family is unavailable from the data provider.")
+        if not benchmark_fund.topHoldings:
+            limitations.append("Top holdings are unavailable from the data provider.")
+        if not benchmark_fund.sectorWeights:
+            limitations.append("Sector weights are unavailable from the data provider.")
+
+        benchmark_fund.dataLimitations = self._dedupe_preserve_order(limitations)
+        return benchmark_fund
+
+    def _get_earnings_calendar_sync(
+        self,
+        start: date,
+        end: date,
+        limit: int,
+        active_only: bool,
+    ) -> EarningsCalendarResponse:
+        try:
+            calendars = yf.Calendars(start=start, end=end)
+            raw_events = calendars.get_earnings_calendar(
+                start=start,
+                end=end,
+                limit=limit,
+                filter_most_active=active_only,
+            )
+        except Exception as exc:
+            self._logger.exception("yfinance earnings calendar fetch failed", exc_info=exc)
+            raise ApiError(
+                code="PROVIDER_ERROR",
+                message="Failed to fetch earnings calendar from market data provider.",
+                status_code=502,
+                details={
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "limit": limit,
+                    "activeOnly": active_only,
+                },
+            ) from exc
+
+        if raw_events is None or getattr(raw_events, "empty", False):
+            return EarningsCalendarResponse(
+                start=start.isoformat(),
+                end=end.isoformat(),
+                limit=limit,
+                activeOnly=active_only,
+                events=[],
+                dataLimitations=[],
+            )
+
+        events: list[EarningsCalendarEvent] = []
+        skipped_rows = 0
+        iterrows = getattr(raw_events, "iterrows", None)
+        if not callable(iterrows):
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Earnings calendar data is unavailable.",
+                status_code=404,
+                details={"start": start.isoformat(), "end": end.isoformat()},
+            )
+
+        for index, row in iterrows():
+            mapped_event = self._map_earnings_calendar_event(index=index, row=row)
+            if mapped_event is None:
+                skipped_rows += 1
+                continue
+            events.append(mapped_event)
+            if len(events) >= limit:
+                break
+
+        if not events and skipped_rows > 0:
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Earnings calendar data is unavailable.",
+                status_code=404,
+                details={"start": start.isoformat(), "end": end.isoformat()},
+            )
+
+        limitations: list[str] = []
+        if skipped_rows > 0:
+            limitations.append(
+                f"{skipped_rows} earnings calendar entries were omitted because provider fields were incomplete."
+            )
+
+        return EarningsCalendarResponse(
+            start=start.isoformat(),
+            end=end.isoformat(),
+            limit=limit,
+            activeOnly=active_only,
+            events=events,
+            dataLimitations=limitations,
+        )
+
+    def _get_sector_pulse_sync(self) -> SectorPulseResponse:
+        sectors: list[SectorPulseItem] = []
+        top_level_limitations: list[str] = []
+
+        for sector_key in CURATED_SECTOR_KEYS:
+            try:
+                detail = self._get_or_build_sector_detail_sync(sector_key)
+            except ApiError as exc:
+                self._logger.warning("Skipping sector %s from pulse: %s", sector_key, exc.message)
+                top_level_limitations.append(
+                    f"{sector_key} sector data is unavailable from the data provider."
+                )
+                continue
+            except Exception as exc:
+                self._logger.warning("Unexpected sector pulse failure for %s: %s", sector_key, exc)
+                top_level_limitations.append(
+                    f"{sector_key} sector data is unavailable due to a provider parsing error."
+                )
+                continue
+
+            sectors.append(
+                SectorPulseItem(
+                    key=detail.key,
+                    name=detail.name,
+                    symbol=detail.symbol,
+                    overview=detail.overview,
+                    topEtfs=detail.topEtfs[:MAX_SECTOR_PULSE_FUNDS],
+                    topMutualFunds=detail.topMutualFunds[:MAX_SECTOR_PULSE_FUNDS],
+                    topCompanies=detail.topCompanies[:MAX_SECTOR_PULSE_COMPANIES],
+                    dataLimitations=detail.dataLimitations,
+                )
+            )
+
+        if not sectors:
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Sector pulse data is unavailable.",
+                status_code=404,
+                details={"marketScope": MARKET_SCOPE_US},
+            )
+
+        omitted_count = len(CURATED_SECTOR_KEYS) - len(sectors)
+        if omitted_count > 0:
+            top_level_limitations.insert(
+                0,
+                f"{omitted_count} sectors were omitted because provider data was unavailable.",
+            )
+
+        return SectorPulseResponse(
+            asOf=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            sectors=sectors,
+            dataLimitations=self._dedupe_preserve_order(top_level_limitations),
+        )
+
+    def _get_or_build_sector_detail_sync(self, sector_key: str) -> SectorDetailResponse:
+        cached = self._sector_detail_cache.get(sector_key)
+        if cached is not None:
+            return cached
+
+        detail = self._build_sector_detail_sync(sector_key)
+        self._sector_detail_cache.set(sector_key, detail)
+        return detail
+
+    def _build_sector_detail_sync(self, sector_key: str) -> SectorDetailResponse:
+        try:
+            sector = yf.Sector(sector_key)
+        except Exception as exc:
+            self._logger.exception("yfinance sector init failed", exc_info=exc)
+            raise ApiError(
+                code="PROVIDER_ERROR",
+                message="Failed to initialize sector data from market data provider.",
+                status_code=502,
+                details={"sectorKey": sector_key},
+            ) from exc
+
+        try:
+            name = coerce_str(sector.name)
+            symbol = coerce_str(sector.symbol)
+            overview = self._map_sector_overview(sector.overview)
+            top_etfs = self._map_sector_fund_references(sector.top_etfs)
+            top_mutual_funds = self._map_sector_fund_references(sector.top_mutual_funds)
+            top_companies = self._map_sector_company_references(sector.top_companies)
+            industries = self._map_sector_industries(sector.industries)
+        except Exception as exc:
+            self._logger.exception("yfinance sector fetch failed", exc_info=exc)
+            raise ApiError(
+                code="PROVIDER_ERROR",
+                message="Failed to fetch sector data from market data provider.",
+                status_code=502,
+                details={"sectorKey": sector_key},
+            ) from exc
+
+        detail = SectorDetailResponse(
+            key=sector_key,
+            name=name,
+            symbol=symbol,
+            overview=overview,
+            topEtfs=top_etfs,
+            topMutualFunds=top_mutual_funds,
+            topCompanies=top_companies,
+            industries=industries,
+            dataLimitations=[],
+        )
+
+        if self._sector_detail_has_no_material_data(detail):
+            raise ApiError(
+                code="DATA_UNAVAILABLE",
+                message="Sector data is unavailable.",
+                status_code=404,
+                details={"sectorKey": sector_key},
+            )
+
+        limitations: list[str] = []
+        if detail.name is None:
+            limitations.append("Sector name is unavailable from the data provider.")
+        if detail.symbol is None:
+            limitations.append("Sector symbol is unavailable from the data provider.")
+        if detail.overview.description is None:
+            limitations.append("Sector description is unavailable from the data provider.")
+        if not detail.topEtfs:
+            limitations.append("Top ETFs are unavailable from the data provider.")
+        if not detail.topMutualFunds:
+            limitations.append("Top mutual funds are unavailable from the data provider.")
+        if not detail.topCompanies:
+            limitations.append("Top companies are unavailable from the data provider.")
+        if not detail.industries:
+            limitations.append("Industry breakdown is unavailable from the data provider.")
+
+        detail.dataLimitations = self._dedupe_preserve_order(limitations)
+        return detail
+
+    def _map_benchmark_holdings(self, payload: Any) -> list[BenchmarkHolding]:
+        iterrows = getattr(payload, "iterrows", None)
+        if not callable(iterrows):
+            return []
+
+        holdings: list[BenchmarkHolding] = []
+        for index, row in iterrows():
+            row_mapping = self._coerce_mapping(row)
+            symbol = normalize_symbol(
+                first_non_null(
+                    coerce_str(index),
+                    coerce_str(row_mapping.get("Symbol")),
+                )
+                or ""
+            )
+            if not symbol:
+                continue
+
+            name = coerce_str(row_mapping.get("Name"))
+            holding_percent = coerce_float(row_mapping.get("Holding Percent"))
+            if name is None and holding_percent is None:
+                continue
+
+            holdings.append(
+                BenchmarkHolding(
+                    symbol=symbol,
+                    name=name,
+                    holdingPercent=holding_percent,
+                )
+            )
+            if len(holdings) >= MAX_BENCHMARK_HOLDINGS:
+                break
+
+        return holdings
+
+    def _map_benchmark_sector_weights(self, payload: Any) -> list[BenchmarkSectorWeight]:
+        raw_mapping = self._coerce_mapping(payload)
+        if not raw_mapping:
+            return []
+
+        sector_weights: list[BenchmarkSectorWeight] = []
+        for raw_sector, raw_weight in sorted(
+            raw_mapping.items(),
+            key=lambda item: coerce_float(item[1]) or float("-inf"),
+            reverse=True,
+        ):
+            sector = self._format_sector_name(coerce_str(raw_sector))
+            weight = coerce_float(raw_weight)
+            if sector is None or weight is None:
+                continue
+
+            sector_weights.append(BenchmarkSectorWeight(sector=sector, weight=weight))
+            if len(sector_weights) >= MAX_BENCHMARK_SECTOR_WEIGHTS:
+                break
+
+        return sector_weights
+
+    def _map_sector_overview(self, payload: Any) -> SectorOverview:
+        overview_mapping = self._coerce_mapping(payload)
+        return SectorOverview(
+            companiesCount=self._coerce_non_negative_int(
+                first_non_null(
+                    overview_mapping.get("companies_count"),
+                    overview_mapping.get("companiesCount"),
+                )
+            ),
+            marketCap=self._coerce_finite_float(
+                first_non_null(
+                    overview_mapping.get("market_cap"),
+                    overview_mapping.get("marketCap"),
+                )
+            ),
+            messageBoardId=first_non_null(
+                coerce_str(overview_mapping.get("message_board_id")),
+                coerce_str(overview_mapping.get("messageBoardId")),
+            ),
+            description=coerce_str(overview_mapping.get("description")),
+            industriesCount=self._coerce_non_negative_int(
+                first_non_null(
+                    overview_mapping.get("industries_count"),
+                    overview_mapping.get("industriesCount"),
+                )
+            ),
+            marketWeight=self._coerce_finite_float(
+                first_non_null(
+                    overview_mapping.get("market_weight"),
+                    overview_mapping.get("marketWeight"),
+                )
+            ),
+            employeeCount=self._coerce_non_negative_int(
+                first_non_null(
+                    overview_mapping.get("employee_count"),
+                    overview_mapping.get("employeeCount"),
+                )
+            ),
+        )
+
+    def _map_sector_fund_references(
+        self,
+        payload: Any,
+    ) -> list[SectorFundReference]:
+        raw_mapping = self._coerce_mapping(payload)
+        if not raw_mapping:
+            return []
+
+        funds: list[SectorFundReference] = []
+        for raw_symbol, raw_name in raw_mapping.items():
+            symbol = normalize_symbol(coerce_str(raw_symbol) or "")
+            if not symbol:
+                continue
+            name = coerce_str(raw_name)
+            if name is None:
+                continue
+            funds.append(
+                SectorFundReference(
+                    symbol=symbol,
+                    name=name,
+                )
+            )
+        return funds
+
+    def _map_sector_company_references(
+        self,
+        payload: Any,
+    ) -> list[SectorCompanyReference]:
+        iterrows = getattr(payload, "iterrows", None)
+        if not callable(iterrows):
+            return []
+
+        companies: list[SectorCompanyReference] = []
+        for index, row in iterrows():
+            row_mapping = self._coerce_mapping(row)
+            symbol = normalize_symbol(
+                first_non_null(
+                    coerce_str(index),
+                    coerce_str(row_mapping.get("symbol")),
+                )
+                or ""
+            )
+            if not symbol:
+                continue
+
+            companies.append(
+                SectorCompanyReference(
+                    symbol=symbol,
+                    name=coerce_str(row_mapping.get("name")),
+                    rating=coerce_str(row_mapping.get("rating")),
+                    marketWeight=self._coerce_finite_float(
+                        first_non_null(
+                            row_mapping.get("market weight"),
+                            row_mapping.get("marketWeight"),
+                        )
+                    ),
+                )
+            )
+        return companies
+
+    def _map_sector_industries(
+        self,
+        payload: Any,
+    ) -> list[SectorIndustryReference]:
+        iterrows = getattr(payload, "iterrows", None)
+        if not callable(iterrows):
+            return []
+
+        industries: list[SectorIndustryReference] = []
+        for index, row in iterrows():
+            row_mapping = self._coerce_mapping(row)
+            key = coerce_str(index)
+            if key is None:
+                continue
+            industries.append(
+                SectorIndustryReference(
+                    key=key,
+                    name=coerce_str(row_mapping.get("name")),
+                    symbol=coerce_str(row_mapping.get("symbol")),
+                    marketWeight=self._coerce_finite_float(
+                        first_non_null(
+                            row_mapping.get("market weight"),
+                            row_mapping.get("marketWeight"),
+                        )
+                    ),
+                )
+            )
+        return industries
+
+    def _map_earnings_calendar_event(self, *, index: Any, row: Any) -> EarningsCalendarEvent | None:
+        row_mapping = self._coerce_mapping(row)
+
+        raw_symbol = first_non_null(
+            coerce_str(index),
+            coerce_str(row_mapping.get("Symbol")),
+        )
+        if raw_symbol is None:
+            return None
+
+        symbol = normalize_symbol(raw_symbol)
+        if not is_valid_symbol(symbol):
+            return None
+
+        earnings_date = self._coerce_calendar_timestamp(
+            first_non_null(
+                row_mapping.get("Event Start Date"),
+                row_mapping.get("Date"),
+                row_mapping.get("Earnings Date"),
+                row_mapping.get("startdatetime"),
+            )
+        )
+        if earnings_date is None:
+            return None
+
+        return EarningsCalendarEvent(
+            symbol=symbol,
+            companyName=first_non_null(
+                coerce_str(row_mapping.get("Company")),
+                coerce_str(row_mapping.get("Company Name")),
+            ),
+            earningsDate=earnings_date,
+            reportTime=first_non_null(
+                coerce_str(row_mapping.get("Timing")),
+                coerce_str(row_mapping.get("Report Time")),
+                coerce_str(row_mapping.get("Event Name")),
+            ),
+            epsEstimate=first_non_null(
+                self._coerce_finite_float(row_mapping.get("EPS Estimate")),
+                self._coerce_finite_float(row_mapping.get("epsestimate")),
+            ),
+            reportedEps=first_non_null(
+                self._coerce_finite_float(row_mapping.get("Reported EPS")),
+                self._coerce_finite_float(row_mapping.get("epsactual")),
+            ),
+            surprisePercent=first_non_null(
+                self._coerce_finite_float(row_mapping.get("Surprise(%)")),
+                self._coerce_finite_float(row_mapping.get("Surprise (%)")),
+                self._coerce_finite_float(row_mapping.get("epssurprisepct")),
+            ),
+            marketCap=first_non_null(
+                self._coerce_finite_float(row_mapping.get("Marketcap")),
+                self._coerce_finite_float(row_mapping.get("Market Cap (Intraday)")),
+                self._coerce_finite_float(row_mapping.get("intradaymarketcap")),
+            ),
+        )
+
+    def _extract_fund_operation_value(
+        self,
+        payload: Any,
+        *,
+        row_label: str,
+        symbol: str,
+    ) -> float | None:
+        loc = getattr(payload, "loc", None)
+        if loc is None:
+            return None
+
+        try:
+            row = loc[row_label]
+        except Exception:
+            return None
+
+        row_mapping = self._coerce_mapping(row)
+        if row_mapping:
+            return coerce_float(row_mapping.get(symbol))
+        return coerce_float(row)
+
+    @staticmethod
+    def _coerce_positive_float(value: Any) -> float | None:
+        coerced_value = coerce_float(value)
+        if coerced_value is None:
+            return None
+        if not isfinite(coerced_value):
+            return None
+        if coerced_value <= 0:
+            return None
+        return coerced_value
+
+    @staticmethod
+    def _coerce_percentage_basis_points(value: Any) -> float | None:
+        coerced_value = coerce_float(value)
+        if coerced_value is None:
+            return None
+        if not isfinite(coerced_value):
+            return None
+        if coerced_value <= 0:
+            return None
+        return coerced_value / 100
+
+    @staticmethod
+    def _coerce_calendar_timestamp(value: Any) -> str | None:
+        dt_value: datetime | None = None
+
+        if isinstance(value, datetime):
+            dt_value = value
+        elif isinstance(value, date):
+            dt_value = datetime.combine(value, datetime.min.time())
+        elif hasattr(value, "to_pydatetime"):
+            try:
+                parsed = value.to_pydatetime()
+            except Exception:
+                parsed = None
+            if isinstance(parsed, datetime):
+                dt_value = parsed
+        elif isinstance(value, str):
+            dt_value = YFinanceService._parse_iso_timestamp(value)
+            if dt_value is None:
+                try:
+                    dt_value = datetime.fromisoformat(value)
+                except ValueError:
+                    return None
+
+        if dt_value is None:
+            return None
+
+        if dt_value.tzinfo is None:
+            dt_value = dt_value.replace(tzinfo=timezone.utc)
+        else:
+            dt_value = dt_value.astimezone(timezone.utc)
+
+        return dt_value.isoformat().replace("+00:00", "Z")
+
+    def _safe_get_mapping_attr(
+        self,
+        payload: Any,
+        attribute: str,
+        *,
+        symbol: str,
+        limitations: list[str],
+        failure_message: str,
+    ) -> dict[str, Any]:
+        value = self._safe_get_attr(
+            payload,
+            attribute,
+            symbol=symbol,
+            limitations=limitations,
+            failure_message=failure_message,
+        )
+        return self._coerce_mapping(value)
+
+    def _safe_get_attr(
+        self,
+        payload: Any,
+        attribute: str,
+        *,
+        symbol: str,
+        limitations: list[str],
+        failure_message: str,
+    ) -> Any:
+        try:
+            return getattr(payload, attribute, None)
+        except Exception as exc:
+            self._logger.warning("Benchmark %s fetch failed for %s: %s", attribute, symbol, exc)
+            limitations.append(failure_message)
+            return None
+
+    @staticmethod
+    def _format_sector_name(value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.replace("_", " ").replace("-", " ").strip()
+        if not normalized:
+            return None
+        return " ".join(part.capitalize() for part in normalized.split())
+
+    @staticmethod
+    def _benchmark_fund_has_no_material_data(fund: BenchmarkFund) -> bool:
+        return (
+            fund.currentPrice is None
+            and fund.previousClose is None
+            and fund.expenseRatio is None
+            and fund.netAssets is None
+            and fund.fundFamily is None
+            and not fund.topHoldings
+            and not fund.sectorWeights
+        )
+
+    @staticmethod
+    def _sector_overview_has_material_data(overview: SectorOverview) -> bool:
+        return any(
+            value is not None
+            for value in (
+                overview.companiesCount,
+                overview.marketCap,
+                overview.messageBoardId,
+                overview.description,
+                overview.industriesCount,
+                overview.marketWeight,
+                overview.employeeCount,
+            )
+        )
+
+    def _sector_detail_has_no_material_data(self, detail: SectorDetailResponse) -> bool:
+        return (
+            detail.name is None
+            and detail.symbol is None
+            and not self._sector_overview_has_material_data(detail.overview)
+            and not detail.topEtfs
+            and not detail.topMutualFunds
+            and not detail.topCompanies
+            and not detail.industries
+        )
 
     def _fetch_search_quotes(self, *, query: str, limit: int) -> list[dict[str, Any]]:
         try:
