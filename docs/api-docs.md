@@ -713,17 +713,36 @@ Returns ownership and holder tables.
 
 - `symbol` required
 
+**Query parameters**
+
+- `section` optional, default `all`
+  - allowed:
+    - `all`
+    - `institutional`
+    - `mutual_funds`
+    - `insider_roster`
+- `limit` optional, integer, default `25`, minimum `1`, maximum `100`
+- `offset` optional, integer, default `0`, minimum `0`
+
 **Behavior**
 
 - `majorHolders` is a normalized metric list, not a raw provider table.
-- `institutionalHolders`, `mutualFundHolders`, and `insiderRoster` are capped server-side to keep payloads bounded.
+- `majorHolders` is never paged.
+- `institutionalHolders`, `mutualFundHolders`, and `insiderRoster` are paged independently using the same requested `limit` and `offset`.
+- `section=all` returns all three paged holder arrays plus pagination metadata for all three sections.
+- Section-specific requests return only the requested holder array; non-requested arrays are `[]` and non-requested pagination objects are `null`.
 - ETF and thinly covered symbols may have no material ownership tables and return `404 DATA_UNAVAILABLE`.
+- Negative offsets return `400 VALIDATION_ERROR`.
+- Unsupported `section` values return `400 VALIDATION_ERROR`.
 
 **Response shape**
 
 ```json
 {
   "symbol": "AAPL",
+  "requestedSection": "all",
+  "limit": 5,
+  "offset": 0,
   "majorHolders": [
     {
       "key": "insidersPercentHeld",
@@ -743,6 +762,30 @@ Returns ownership and holder tables.
   ],
   "mutualFundHolders": [],
   "insiderRoster": [],
+  "institutionalPagination": {
+    "offset": 0,
+    "limit": 5,
+    "returnedCount": 5,
+    "totalAvailable": 10,
+    "hasMore": true,
+    "nextOffset": 5
+  },
+  "mutualFundPagination": {
+    "offset": 0,
+    "limit": 5,
+    "returnedCount": 5,
+    "totalAvailable": 10,
+    "hasMore": true,
+    "nextOffset": 5
+  },
+  "insiderRosterPagination": {
+    "offset": 0,
+    "limit": 5,
+    "returnedCount": 5,
+    "totalAvailable": 10,
+    "hasMore": true,
+    "nextOffset": 5
+  },
   "dataLimitations": [
     "Mutual fund holders are unavailable from the data provider.",
     "Insider roster is unavailable from the data provider."
@@ -760,7 +803,11 @@ Returns ownership and holder tables.
 **Example**
 
 ```bash
-curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/ownership"
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/ownership?section=all&limit=5&offset=0"
+```
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/ownership?section=institutional&limit=5&offset=5"
 ```
 
 ### `GET /api/v1/tickers/{symbol}/options/expirations`
@@ -1235,15 +1282,20 @@ Returns a US earnings calendar window with normalized event rows.
 - `end` optional, `YYYY-MM-DD`
   - default: `start + 7 days`
 - `limit` optional, integer, default `25`, minimum `1`, maximum `100`
+- `offset` optional, integer, default `0`, minimum `0`
 - `activeOnly` optional, boolean, default `true`
 
 **Behavior**
 
 - Valid empty ranges return `200` with `events: []`.
 - Invalid date format or `end < start` returns `400 VALIDATION_ERROR`.
+- Negative offsets return `400 VALIDATION_ERROR`.
 - `activeOnly=true` uses Yahoo's active-stock filter when building the calendar.
 - `earningsDate` is returned as an ISO timestamp string because provider events are timed.
 - Rows without a usable symbol or earnings date are dropped.
+- Pagination is offset-based.
+- `returnedCount`, `hasMore`, and `nextOffset` drive frontend paging controls.
+- Exact total available rows are not exposed for this endpoint.
 
 **Response shape**
 
@@ -1252,7 +1304,11 @@ Returns a US earnings calendar window with normalized event rows.
   "start": "2026-03-16",
   "end": "2026-03-23",
   "limit": 25,
+  "offset": 0,
   "activeOnly": true,
+  "returnedCount": 25,
+  "hasMore": true,
+  "nextOffset": 25,
   "events": [
     {
       "symbol": "AAPL",
@@ -1283,7 +1339,7 @@ curl "http://127.0.0.1:8000/api/v1/market/earnings-calendar"
 ```
 
 ```bash
-curl "http://127.0.0.1:8000/api/v1/market/earnings-calendar?start=2026-03-16&end=2026-03-23&limit=50&activeOnly=true"
+curl "http://127.0.0.1:8000/api/v1/market/earnings-calendar?start=2026-03-16&end=2026-03-23&limit=50&offset=50&activeOnly=true"
 ```
 
 ### `GET /api/v1/market/sectors/pulse`

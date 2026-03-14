@@ -75,7 +75,11 @@ class EarningsCalendarResponse(BaseModel):
     start: str
     end: str
     limit: int
+    offset: int
     activeOnly: bool
+    returnedCount: int
+    hasMore: bool
+    nextOffset: int | None = None
     events: list[EarningsCalendarEvent] = Field(default_factory=list)
     dataLimitations: list[str] = Field(default_factory=list)
 

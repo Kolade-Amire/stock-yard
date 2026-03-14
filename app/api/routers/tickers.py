@@ -118,9 +118,17 @@ async def get_analyst_history(
 @router.get("/{symbol}/ownership", response_model=OwnershipResponse)
 async def get_ticker_ownership(
     symbol: str,
+    section: str = Query(default="all"),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0),
     service: YFinanceService = Depends(get_yfinance_service),
 ) -> OwnershipResponse:
-    return await service.get_ticker_ownership(symbol=symbol)
+    return await service.get_ticker_ownership(
+        symbol=symbol,
+        section=section,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{symbol}/options/expirations", response_model=OptionsExpirationsResponse)

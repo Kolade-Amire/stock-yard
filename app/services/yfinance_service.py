@@ -36,6 +36,7 @@ from app.schemas.ticker import (
     OptionContract,
     OptionsChainResponse,
     OptionsExpirationsResponse,
+    OwnershipPagination,
     OwnershipResponse,
     PriceBar,
     RevenueEstimatePoint,
@@ -87,14 +88,15 @@ DEFAULT_MOVERS_LIMIT = 10
 MAX_MOVERS_LIMIT = 25
 DEFAULT_EARNINGS_CALENDAR_LIMIT = 25
 MAX_EARNINGS_CALENDAR_LIMIT = 100
+DEFAULT_OWNERSHIP_LIMIT = 25
+MAX_OWNERSHIP_LIMIT = 100
 MAX_COMPARE_SYMBOLS = 5
 MAX_ANALYST_HISTORY_ACTION_EVENTS = 25
-MAX_OWNERSHIP_HOLDER_ROWS = 25
-MAX_INSIDER_ROSTER_ROWS = 25
 MAX_BENCHMARK_HOLDINGS = 5
 MAX_BENCHMARK_SECTOR_WEIGHTS = 5
 MAX_SECTOR_PULSE_FUNDS = 3
 MAX_SECTOR_PULSE_COMPANIES = 3
+ALLOWED_OWNERSHIP_SECTIONS = frozenset({"all", "institutional", "mutual_funds", "insider_roster"})
 ALLOWED_MOVER_SCREENS: dict[str, str] = {
     "gainers": "day_gainers",
     "losers": "day_losers",
@@ -289,6 +291,7 @@ class YFinanceService:
         start: str | None = None,
         end: str | None = None,
         limit: int = DEFAULT_EARNINGS_CALENDAR_LIMIT,
+        offset: int = 0,
         active_only: bool = True,
     ) -> EarningsCalendarResponse:
         normalized_start, normalized_end = self._normalize_earnings_calendar_range(
@@ -296,10 +299,11 @@ class YFinanceService:
             end=end,
         )
         bounded_limit = self._normalize_and_validate_earnings_calendar_limit(limit)
+        normalized_offset = self._normalize_and_validate_offset(offset=offset, field_name="offset")
 
         cache_key = (
             f"{normalized_start.isoformat()}:{normalized_end.isoformat()}:"
-            f"{bounded_limit}:{int(active_only)}"
+            f"{bounded_limit}:{normalized_offset}:{int(active_only)}"
         )
         cached = self._earnings_calendar_cache.get(cache_key)
         if cached is not None:
@@ -311,6 +315,7 @@ class YFinanceService:
             normalized_start,
             normalized_end,
             bounded_limit,
+            normalized_offset,
             active_only,
         )
         self._earnings_calendar_cache.set(cache_key, response)
@@ -506,15 +511,33 @@ class YFinanceService:
         self._compare_cache.set(cache_key, response)
         return response
 
-    async def get_ticker_ownership(self, symbol: str) -> OwnershipResponse:
+    async def get_ticker_ownership(
+        self,
+        *,
+        symbol: str,
+        section: str = "all",
+        limit: int = DEFAULT_OWNERSHIP_LIMIT,
+        offset: int = 0,
+    ) -> OwnershipResponse:
         normalized_symbol = self._normalize_and_validate_symbol(symbol)
-        cached = self._ownership_cache.get(normalized_symbol)
+        normalized_section = self._normalize_and_validate_ownership_section(section)
+        bounded_limit = self._normalize_and_validate_ownership_limit(limit)
+        normalized_offset = self._normalize_and_validate_offset(offset=offset, field_name="offset")
+
+        cache_key = f"{normalized_symbol}:{normalized_section}:{bounded_limit}:{normalized_offset}"
+        cached = self._ownership_cache.get(cache_key)
         if cached is not None:
-            self._logger.info("Ownership cache hit for %s", normalized_symbol)
+            self._logger.info("Ownership cache hit for %s", cache_key)
             return cached
 
-        response = await run_in_threadpool(self._get_ticker_ownership_sync, normalized_symbol)
-        self._ownership_cache.set(normalized_symbol, response)
+        response = await run_in_threadpool(
+            self._get_ticker_ownership_sync,
+            normalized_symbol,
+            normalized_section,
+            bounded_limit,
+            normalized_offset,
+        )
+        self._ownership_cache.set(cache_key, response)
         return response
 
     async def get_option_expirations(self, symbol: str) -> OptionsExpirationsResponse:
@@ -718,6 +741,47 @@ class YFinanceService:
                 },
             )
         return limit
+
+    @staticmethod
+    def _normalize_and_validate_ownership_limit(limit: int) -> int:
+        if limit < 1 or limit > MAX_OWNERSHIP_LIMIT:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message="Ownership limit is outside the supported range.",
+                status_code=400,
+                details={
+                    "limit": limit,
+                    "minLimit": 1,
+                    "maxLimit": MAX_OWNERSHIP_LIMIT,
+                },
+            )
+        return limit
+
+    @staticmethod
+    def _normalize_and_validate_ownership_section(section: str) -> str:
+        normalized_section = section.strip().lower()
+        if normalized_section not in ALLOWED_OWNERSHIP_SECTIONS:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message="Unsupported ownership section.",
+                status_code=400,
+                details={
+                    "section": section,
+                    "allowedSections": sorted(ALLOWED_OWNERSHIP_SECTIONS),
+                },
+            )
+        return normalized_section
+
+    @staticmethod
+    def _normalize_and_validate_offset(*, offset: int, field_name: str) -> int:
+        if offset < 0:
+            raise ApiError(
+                code="VALIDATION_ERROR",
+                message=f"{field_name} must be greater than or equal to zero.",
+                status_code=400,
+                details={field_name: offset, "minValue": 0},
+            )
+        return offset
 
     def _validate_history_period_interval(
         self,
@@ -1145,6 +1209,7 @@ class YFinanceService:
         start: date,
         end: date,
         limit: int,
+        offset: int,
         active_only: bool,
     ) -> EarningsCalendarResponse:
         try:
@@ -1152,7 +1217,8 @@ class YFinanceService:
             raw_events = calendars.get_earnings_calendar(
                 start=start,
                 end=end,
-                limit=limit,
+                limit=limit + 1,
+                offset=offset,
                 filter_most_active=active_only,
             )
         except Exception as exc:
@@ -1165,6 +1231,7 @@ class YFinanceService:
                     "start": start.isoformat(),
                     "end": end.isoformat(),
                     "limit": limit,
+                    "offset": offset,
                     "activeOnly": active_only,
                 },
             ) from exc
@@ -1174,7 +1241,11 @@ class YFinanceService:
                 start=start.isoformat(),
                 end=end.isoformat(),
                 limit=limit,
+                offset=offset,
                 activeOnly=active_only,
+                returnedCount=0,
+                hasMore=False,
+                nextOffset=None,
                 events=[],
                 dataLimitations=[],
             )
@@ -1187,7 +1258,7 @@ class YFinanceService:
                 code="DATA_UNAVAILABLE",
                 message="Earnings calendar data is unavailable.",
                 status_code=404,
-                details={"start": start.isoformat(), "end": end.isoformat()},
+                details={"start": start.isoformat(), "end": end.isoformat(), "offset": offset},
             )
 
         for index, row in iterrows():
@@ -1196,7 +1267,7 @@ class YFinanceService:
                 skipped_rows += 1
                 continue
             events.append(mapped_event)
-            if len(events) >= limit:
+            if len(events) >= limit + 1:
                 break
 
         if not events and skipped_rows > 0:
@@ -1204,7 +1275,7 @@ class YFinanceService:
                 code="DATA_UNAVAILABLE",
                 message="Earnings calendar data is unavailable.",
                 status_code=404,
-                details={"start": start.isoformat(), "end": end.isoformat()},
+                details={"start": start.isoformat(), "end": end.isoformat(), "offset": offset},
             )
 
         limitations: list[str] = []
@@ -1213,12 +1284,20 @@ class YFinanceService:
                 f"{skipped_rows} earnings calendar entries were omitted because provider fields were incomplete."
             )
 
+        has_more = len(events) > limit
+        trimmed_events = events[:limit]
+        returned_count = len(trimmed_events)
+
         return EarningsCalendarResponse(
             start=start.isoformat(),
             end=end.isoformat(),
             limit=limit,
+            offset=offset,
             activeOnly=active_only,
-            events=events,
+            returnedCount=returned_count,
+            hasMore=has_more,
+            nextOffset=offset + returned_count if has_more else None,
+            events=trimmed_events,
             dataLimitations=limitations,
         )
 
@@ -2971,7 +3050,13 @@ class YFinanceService:
             dataLimitations=self._dedupe_preserve_order(limitations),
         )
 
-    def _get_ticker_ownership_sync(self, symbol: str) -> OwnershipResponse:
+    def _get_ticker_ownership_sync(
+        self,
+        symbol: str,
+        section: str,
+        limit: int,
+        offset: int,
+    ) -> OwnershipResponse:
         try:
             ticker = yf.Ticker(symbol)
             major_holders = getattr(ticker, "major_holders", None)
@@ -2987,16 +3072,27 @@ class YFinanceService:
                 details={"symbol": symbol},
             ) from exc
 
-        response = OwnershipResponse(
+        mapped_major_holders = self._map_major_holder_metrics(major_holders)
+        mapped_institutional_holders = self._map_holder_entries(institutional_holders)
+        mapped_mutual_fund_holders = self._map_holder_entries(mutualfund_holders)
+        mapped_insider_roster = self._map_insider_roster_entries(insider_roster)
+
+        full_response = OwnershipResponse(
             symbol=symbol,
-            majorHolders=self._map_major_holder_metrics(major_holders),
-            institutionalHolders=self._map_holder_entries(institutional_holders),
-            mutualFundHolders=self._map_holder_entries(mutualfund_holders),
-            insiderRoster=self._map_insider_roster_entries(insider_roster),
+            requestedSection=section,
+            limit=limit,
+            offset=offset,
+            majorHolders=mapped_major_holders,
+            institutionalHolders=mapped_institutional_holders,
+            mutualFundHolders=mapped_mutual_fund_holders,
+            insiderRoster=mapped_insider_roster,
+            institutionalPagination=None,
+            mutualFundPagination=None,
+            insiderRosterPagination=None,
             dataLimitations=[],
         )
 
-        if self._ownership_has_no_material_data(response):
+        if self._ownership_has_no_material_data(full_response):
             raise ApiError(
                 code="DATA_UNAVAILABLE",
                 message="Ownership data is unavailable for this ticker.",
@@ -3005,17 +3101,66 @@ class YFinanceService:
             )
 
         limitations: list[str] = []
-        if not response.majorHolders:
+        if not mapped_major_holders:
             limitations.append("Major holder metrics are unavailable from the data provider.")
-        if not response.institutionalHolders:
+        if section in {"all", "institutional"} and not mapped_institutional_holders:
             limitations.append("Institutional holders are unavailable from the data provider.")
-        if not response.mutualFundHolders:
+        if section in {"all", "mutual_funds"} and not mapped_mutual_fund_holders:
             limitations.append("Mutual fund holders are unavailable from the data provider.")
-        if not response.insiderRoster:
+        if section in {"all", "insider_roster"} and not mapped_insider_roster:
             limitations.append("Insider roster is unavailable from the data provider.")
 
-        response.dataLimitations = self._dedupe_preserve_order(limitations)
-        return response
+        sliced_institutional = self._slice_paginated_items(mapped_institutional_holders, limit, offset)
+        sliced_mutual_fund = self._slice_paginated_items(mapped_mutual_fund_holders, limit, offset)
+        sliced_insider_roster = self._slice_paginated_items(mapped_insider_roster, limit, offset)
+
+        return OwnershipResponse(
+            symbol=symbol,
+            requestedSection=section,
+            limit=limit,
+            offset=offset,
+            majorHolders=mapped_major_holders,
+            institutionalHolders=(
+                sliced_institutional if section in {"all", "institutional"} else []
+            ),
+            mutualFundHolders=(
+                sliced_mutual_fund if section in {"all", "mutual_funds"} else []
+            ),
+            insiderRoster=(
+                sliced_insider_roster if section in {"all", "insider_roster"} else []
+            ),
+            institutionalPagination=(
+                self._build_ownership_pagination(
+                    total_available=len(mapped_institutional_holders),
+                    limit=limit,
+                    offset=offset,
+                    returned_count=len(sliced_institutional),
+                )
+                if section in {"all", "institutional"}
+                else None
+            ),
+            mutualFundPagination=(
+                self._build_ownership_pagination(
+                    total_available=len(mapped_mutual_fund_holders),
+                    limit=limit,
+                    offset=offset,
+                    returned_count=len(sliced_mutual_fund),
+                )
+                if section in {"all", "mutual_funds"}
+                else None
+            ),
+            insiderRosterPagination=(
+                self._build_ownership_pagination(
+                    total_available=len(mapped_insider_roster),
+                    limit=limit,
+                    offset=offset,
+                    returned_count=len(sliced_insider_roster),
+                )
+                if section in {"all", "insider_roster"}
+                else None
+            ),
+            dataLimitations=self._dedupe_preserve_order(limitations),
+        )
 
     def _get_option_expirations_sync(self, symbol: str) -> OptionsExpirationsResponse:
         try:
@@ -3342,8 +3487,6 @@ class YFinanceService:
             ):
                 continue
             holders.append(entry)
-            if len(holders) >= MAX_OWNERSHIP_HOLDER_ROWS:
-                break
         return holders
 
     def _map_insider_roster_entries(self, payload: Any) -> list[InsiderRosterEntry]:
@@ -3377,9 +3520,31 @@ class YFinanceService:
             ):
                 continue
             entries.append(entry)
-            if len(entries) >= MAX_INSIDER_ROSTER_ROWS:
-                break
         return entries
+
+    @staticmethod
+    def _slice_paginated_items(items: list[Any], limit: int, offset: int) -> list[Any]:
+        if offset >= len(items):
+            return []
+        return items[offset : offset + limit]
+
+    @staticmethod
+    def _build_ownership_pagination(
+        *,
+        total_available: int,
+        limit: int,
+        offset: int,
+        returned_count: int,
+    ) -> OwnershipPagination:
+        has_more = offset + returned_count < total_available
+        return OwnershipPagination(
+            offset=offset,
+            limit=limit,
+            returnedCount=returned_count,
+            totalAvailable=total_available,
+            hasMore=has_more,
+            nextOffset=offset + returned_count if has_more else None,
+        )
 
     def _map_option_contracts(self, payload: Any) -> list[OptionContract]:
         iterrows = getattr(payload, "iterrows", None)

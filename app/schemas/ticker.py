@@ -310,12 +310,27 @@ class InsiderRosterEntry(BaseModel):
     positionDirectDate: str | None = None
 
 
+class OwnershipPagination(BaseModel):
+    offset: int
+    limit: int
+    returnedCount: int
+    totalAvailable: int
+    hasMore: bool
+    nextOffset: int | None = None
+
+
 class OwnershipResponse(BaseModel):
     symbol: str
+    requestedSection: str
+    limit: int
+    offset: int
     majorHolders: list[MajorHolderMetric] = Field(default_factory=list)
     institutionalHolders: list[HolderEntry] = Field(default_factory=list)
     mutualFundHolders: list[HolderEntry] = Field(default_factory=list)
     insiderRoster: list[InsiderRosterEntry] = Field(default_factory=list)
+    institutionalPagination: OwnershipPagination | None = None
+    mutualFundPagination: OwnershipPagination | None = None
+    insiderRosterPagination: OwnershipPagination | None = None
     dataLimitations: list[str] = Field(default_factory=list)
 
 

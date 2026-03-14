@@ -34,7 +34,8 @@ async def get_benchmark_funds(
 async def get_earnings_calendar(
     start: str | None = Query(default=None),
     end: str | None = Query(default=None),
-    limit: int = Query(default=25),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0),
     active_only: bool = Query(default=True, alias="activeOnly"),
     service: YFinanceService = Depends(get_yfinance_service),
 ) -> EarningsCalendarResponse:
@@ -42,6 +43,7 @@ async def get_earnings_calendar(
         start=start,
         end=end,
         limit=limit,
+        offset=offset,
         active_only=active_only,
     )
 
