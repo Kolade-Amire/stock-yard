@@ -65,6 +65,86 @@ class TickerHistoryResponse(BaseModel):
     bars: list[PriceBar] = Field(default_factory=list)
 
 
+class FinancialTrendPoint(BaseModel):
+    periodEnd: str
+    revenue: float | None = None
+    netIncome: float | None = None
+    operatingCashFlow: float | None = None
+    capitalExpenditure: float | None = None
+    freeCashFlow: float | None = None
+
+
+class FinancialTrendsResponse(BaseModel):
+    symbol: str
+    annual: list[FinancialTrendPoint] = Field(default_factory=list)
+    quarterly: list[FinancialTrendPoint] = Field(default_factory=list)
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class EarningsHistoryEvent(BaseModel):
+    reportDate: str
+    quarter: str | None = None
+    epsEstimate: float | None = None
+    epsActual: float | None = None
+    surprisePercent: float | None = None
+
+
+class EarningsHistoryResponse(BaseModel):
+    symbol: str
+    events: list[EarningsHistoryEvent] = Field(default_factory=list)
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class EarningsEstimatePoint(BaseModel):
+    period: str
+    avg: float | None = None
+    low: float | None = None
+    high: float | None = None
+    yearAgoEps: float | None = None
+    numberOfAnalysts: int | None = None
+    growth: float | None = None
+
+
+class RevenueEstimatePoint(BaseModel):
+    period: str
+    avg: float | None = None
+    low: float | None = None
+    high: float | None = None
+    numberOfAnalysts: int | None = None
+    yearAgoRevenue: float | None = None
+    growth: float | None = None
+
+
+class GrowthEstimatePoint(BaseModel):
+    period: str
+    stockTrend: float | None = None
+    indexTrend: float | None = None
+
+
+class EarningsEstimatesResponse(BaseModel):
+    symbol: str
+    epsEstimates: list[EarningsEstimatePoint] = Field(default_factory=list)
+    revenueEstimates: list[RevenueEstimatePoint] = Field(default_factory=list)
+    growthEstimates: list[GrowthEstimatePoint] = Field(default_factory=list)
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class ComparisonSeriesItem(BaseModel):
+    symbol: str
+    displayName: str | None = None
+    currentPrice: float | None = None
+    changePercent: float | None = None
+    bars: list[PriceBar] = Field(default_factory=list)
+
+
+class TickerCompareResponse(BaseModel):
+    symbols: list[str] = Field(default_factory=list)
+    period: str
+    interval: str
+    series: list[ComparisonSeriesItem] = Field(default_factory=list)
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
 class TickerNewsItem(BaseModel):
     title: str | None = None
     publisher: str | None = None
@@ -156,4 +236,115 @@ class AnalystContext(BaseModel):
 class AnalystContextResponse(BaseModel):
     symbol: str
     analystContext: AnalystContext
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class AnalystRecommendationBreakdown(BaseModel):
+    period: str | None = None
+    strongBuy: int | None = None
+    buy: int | None = None
+    hold: int | None = None
+    sell: int | None = None
+    strongSell: int | None = None
+
+
+class AnalystActionTimelineEvent(BaseModel):
+    gradedAt: str | None = None
+    firm: str | None = None
+    toGrade: str | None = None
+    fromGrade: str | None = None
+    action: str | None = None
+    priceTargetAction: str | None = None
+    currentPriceTarget: float | None = None
+    priorPriceTarget: float | None = None
+
+
+class AnalystSummary(BaseModel):
+    currentPriceTarget: float | None = None
+    targetLow: float | None = None
+    targetHigh: float | None = None
+    targetMean: float | None = None
+    targetMedian: float | None = None
+    recommendationSummary: AnalystRecommendationBreakdown = Field(
+        default_factory=AnalystRecommendationBreakdown
+    )
+    recentActionCount: int = 0
+    recentActionWindowDays: int = 0
+
+
+class AnalystSummaryResponse(BaseModel):
+    symbol: str
+    analystSummary: AnalystSummary
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class AnalystHistoryResponse(BaseModel):
+    symbol: str
+    recommendationHistory: list[AnalystRecommendationBreakdown] = Field(default_factory=list)
+    actions: list[AnalystActionTimelineEvent] = Field(default_factory=list)
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class MajorHolderMetric(BaseModel):
+    key: str
+    label: str
+    value: float | None = None
+
+
+class HolderEntry(BaseModel):
+    dateReported: str | None = None
+    holder: str | None = None
+    pctHeld: float | None = None
+    shares: int | None = None
+    value: float | None = None
+    pctChange: float | None = None
+
+
+class InsiderRosterEntry(BaseModel):
+    name: str | None = None
+    position: str | None = None
+    url: str | None = None
+    mostRecentTransaction: str | None = None
+    latestTransactionDate: str | None = None
+    sharesOwnedDirectly: int | None = None
+    positionDirectDate: str | None = None
+
+
+class OwnershipResponse(BaseModel):
+    symbol: str
+    majorHolders: list[MajorHolderMetric] = Field(default_factory=list)
+    institutionalHolders: list[HolderEntry] = Field(default_factory=list)
+    mutualFundHolders: list[HolderEntry] = Field(default_factory=list)
+    insiderRoster: list[InsiderRosterEntry] = Field(default_factory=list)
+    dataLimitations: list[str] = Field(default_factory=list)
+
+
+class OptionsExpirationsResponse(BaseModel):
+    symbol: str
+    expirations: list[str] = Field(default_factory=list)
+
+
+class OptionContract(BaseModel):
+    contractSymbol: str
+    lastTradeDate: str | None = None
+    strike: float | None = None
+    lastPrice: float | None = None
+    bid: float | None = None
+    ask: float | None = None
+    change: float | None = None
+    percentChange: float | None = None
+    volume: int | None = None
+    openInterest: int | None = None
+    impliedVolatility: float | None = None
+    inTheMoney: bool | None = None
+    contractSize: str | None = None
+    currency: str | None = None
+
+
+class OptionsChainResponse(BaseModel):
+    symbol: str
+    expiration: str
+    underlyingPrice: float | None = None
+    calls: list[OptionContract] = Field(default_factory=list)
+    puts: list[OptionContract] = Field(default_factory=list)
     dataLimitations: list[str] = Field(default_factory=list)

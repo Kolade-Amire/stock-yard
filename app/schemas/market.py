@@ -136,3 +136,47 @@ class SectorDetailResponse(BaseModel):
     topCompanies: list[SectorCompanyReference] = Field(default_factory=list)
     industries: list[SectorIndustryReference] = Field(default_factory=list)
     dataLimitations: list[str] = Field(default_factory=list)
+
+
+class IndustryOverview(BaseModel):
+    companiesCount: int | None = None
+    marketCap: float | None = None
+    messageBoardId: str | None = None
+    description: str | None = None
+    marketWeight: float | None = None
+    employeeCount: int | None = None
+
+
+class IndustryCompanyReference(BaseModel):
+    symbol: str
+    name: str | None = None
+    rating: str | None = None
+    marketWeight: float | None = None
+
+
+class IndustryGrowthCompanyReference(BaseModel):
+    symbol: str
+    name: str | None = None
+    ytdReturn: float | None = None
+    growthEstimate: float | None = None
+
+
+class IndustryPerformingCompanyReference(BaseModel):
+    symbol: str
+    name: str | None = None
+    ytdReturn: float | None = None
+    lastPrice: float | None = None
+    targetPrice: float | None = None
+
+
+class IndustryDetailResponse(BaseModel):
+    key: str
+    name: str | None = None
+    symbol: str | None = None
+    sectorKey: str | None = None
+    sectorName: str | None = None
+    overview: IndustryOverview
+    topCompanies: list[IndustryCompanyReference] = Field(default_factory=list)
+    topGrowthCompanies: list[IndustryGrowthCompanyReference] = Field(default_factory=list)
+    topPerformingCompanies: list[IndustryPerformingCompanyReference] = Field(default_factory=list)
+    dataLimitations: list[str] = Field(default_factory=list)

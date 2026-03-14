@@ -17,6 +17,9 @@ Frontend integration reference for the backend currently implemented in this rep
   - The backend rate limiter works best when the frontend provides a consistent session identifier.
 - `dataLimitations` is displayable metadata, not a hard error
   - Overview, news, and financial-summary endpoints may succeed with partial data and include limitations explaining what is missing.
+- Some deeper data endpoints are equity-heavy
+  - ETF symbols often have sparse or empty statement, earnings, analyst, and ownership tables from Yahoo.
+  - For those cases the backend returns either nullable fields plus `dataLimitations`, or `404 DATA_UNAVAILABLE` if there is no material usable dataset.
 - Chat conversation is frontend-supplied
   - The backend does not persist chat history.
   - The backend clips the provided conversation to the most recent configured turns before sending it to the model.
@@ -354,6 +357,510 @@ Returns normalized financial summary metrics.
 
 ```bash
 curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/financial-summary"
+```
+
+### `GET /api/v1/tickers/{symbol}/financials/trends`
+
+Returns chart-friendly annual and quarterly financial trend series.
+
+**Path parameters**
+
+- `symbol` required
+
+**Behavior**
+
+- Built from normalized income-statement and cash-flow rows.
+- `annual` and `quarterly` are sorted ascending by `periodEnd`.
+- `freeCashFlow` may be provider-supplied or derived from `operatingCashFlow + capitalExpenditure` when Yahoo omits the direct row.
+- ETF symbols often have no material statement tables and may return `404 DATA_UNAVAILABLE`.
+
+**Response shape**
+
+```json
+{
+  "symbol": "AAPL",
+  "annual": [
+    {
+      "periodEnd": "2024-09-30",
+      "revenue": 391035000000,
+      "netIncome": 93736000000,
+      "operatingCashFlow": 118254000000,
+      "capitalExpenditure": -9447000000,
+      "freeCashFlow": 108807000000
+    }
+  ],
+  "quarterly": [
+    {
+      "periodEnd": "2025-12-31",
+      "revenue": 143756000000,
+      "netIncome": 42097000000,
+      "operatingCashFlow": 53925000000,
+      "capitalExpenditure": -2373000000,
+      "freeCashFlow": 51552000000
+    }
+  ],
+  "dataLimitations": []
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 INVALID_SYMBOL`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/financials/trends"
+```
+
+### `GET /api/v1/tickers/{symbol}/earnings/history`
+
+Returns normalized earnings surprise history.
+
+**Path parameters**
+
+- `symbol` required
+
+**Behavior**
+
+- Rows are built from Yahoo earnings-history tables and sorted ascending by `reportDate`.
+- `quarter` is derived from the report-period end date.
+- Symbols with no material earnings history return `404 DATA_UNAVAILABLE`.
+
+**Response shape**
+
+```json
+{
+  "symbol": "AAPL",
+  "events": [
+    {
+      "reportDate": "2025-12-31",
+      "quarter": "Q4 2025",
+      "epsEstimate": 2.6708,
+      "epsActual": 2.84,
+      "surprisePercent": 0.0634
+    }
+  ],
+  "dataLimitations": []
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 INVALID_SYMBOL`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/earnings/history"
+```
+
+### `GET /api/v1/tickers/{symbol}/earnings/estimates`
+
+Returns normalized EPS, revenue, and growth estimate tables.
+
+**Path parameters**
+
+- `symbol` required
+
+**Behavior**
+
+- Endpoint can succeed with partial sections.
+- `epsEstimates`, `revenueEstimates`, and `growthEstimates` are separate arrays because Yahoo coverage may differ by table.
+- If all three sections are empty, the endpoint returns `404 DATA_UNAVAILABLE`.
+
+**Response shape**
+
+```json
+{
+  "symbol": "AAPL",
+  "epsEstimates": [
+    {
+      "period": "0q",
+      "avg": 1.9542,
+      "low": 1.85,
+      "high": 2.16,
+      "yearAgoEps": 1.65,
+      "numberOfAnalysts": 29,
+      "growth": 0.1844
+    }
+  ],
+  "revenueEstimates": [
+    {
+      "period": "0q",
+      "avg": 109068626370,
+      "low": 105000000000,
+      "high": 112596000000,
+      "numberOfAnalysts": 30,
+      "yearAgoRevenue": 95359000000,
+      "growth": 0.1438
+    }
+  ],
+  "growthEstimates": [
+    {
+      "period": "0q",
+      "stockTrend": 0.1855,
+      "indexTrend": 0.133
+    }
+  ],
+  "dataLimitations": []
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 INVALID_SYMBOL`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/earnings/estimates"
+```
+
+### `GET /api/v1/tickers/compare`
+
+Returns normalized multi-symbol comparison series.
+
+**Query parameters**
+
+- `symbols` required, comma-separated ticker list
+  - minimum `2` unique symbols
+  - maximum `5` unique symbols
+- `period` required
+  - allowed: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `5y`, `max`
+- `interval` required
+  - allowed: `1m`, `5m`, `15m`, `1h`, `1d`, `1wk`, `1mo`
+
+**Behavior**
+
+- Uses the same period/interval validation rules as `/tickers/{symbol}/history`.
+- Comparison is all-or-nothing on requested symbol history:
+  - if one requested symbol cannot produce usable history, the request fails
+- Benchmark ETF comparison is supported by passing symbols like `SPY`, `QQQ`, `DIA`, `IWM`, `VTI`, or `BND`.
+- `bars` reuse the same shape as the single-symbol history endpoint.
+
+**Response shape**
+
+```json
+{
+  "symbols": ["AAPL", "MSFT", "SPY"],
+  "period": "6mo",
+  "interval": "1d",
+  "series": [
+    {
+      "symbol": "AAPL",
+      "displayName": "Apple Inc.",
+      "currentPrice": 250.12,
+      "changePercent": -2.18,
+      "bars": [
+        {
+          "timestamp": "2026-03-13T04:00:00Z",
+          "open": 255.4,
+          "high": 256.33,
+          "low": 249.52,
+          "close": 250.12,
+          "adj_close": 250.12,
+          "volume": 34193754
+        }
+      ]
+    }
+  ],
+  "dataLimitations": []
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 VALIDATION_ERROR`
+- `400 INVALID_SYMBOL`
+- `400 INVALID_PERIOD_INTERVAL`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/compare?symbols=AAPL,MSFT,SPY&period=6mo&interval=1d"
+```
+
+### `GET /api/v1/tickers/{symbol}/analyst/summary`
+
+Returns a current analyst snapshot suitable for headline panels.
+
+**Path parameters**
+
+- `symbol` required
+
+**Behavior**
+
+- Summary includes current target bands, the latest recommendation breakdown, and the count of recent analyst actions within the configured backend window.
+- `recentActionCount` is currently measured over the last `90` days.
+- Endpoint may succeed with partial target/recommendation coverage and report gaps via `dataLimitations`.
+
+**Response shape**
+
+```json
+{
+  "symbol": "AAPL",
+  "analystSummary": {
+    "currentPriceTarget": 250.12,
+    "targetLow": 205.0,
+    "targetHigh": 350.0,
+    "targetMean": 295.43536,
+    "targetMedian": 300.0,
+    "recommendationSummary": {
+      "period": "0m",
+      "strongBuy": 6,
+      "buy": 25,
+      "hold": 15,
+      "sell": 1,
+      "strongSell": 1
+    },
+    "recentActionCount": 21,
+    "recentActionWindowDays": 90
+  },
+  "dataLimitations": []
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 INVALID_SYMBOL`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/analyst/summary"
+```
+
+### `GET /api/v1/tickers/{symbol}/analyst/history`
+
+Returns recommendation-history rows and recent analyst action events.
+
+**Path parameters**
+
+- `symbol` required
+
+**Behavior**
+
+- `recommendationHistory` is normalized from Yahoo recommendation tables.
+- `actions` is a recent-window analyst action timeline, sorted newest first.
+- Action fields such as `firm`, `toGrade`, and `fromGrade` may be `null` because Yahoo often omits them even when price-target actions are present.
+- If both sections are empty, the endpoint returns `404 DATA_UNAVAILABLE`.
+
+**Response shape**
+
+```json
+{
+  "symbol": "AAPL",
+  "recommendationHistory": [
+    {
+      "period": "0m",
+      "strongBuy": 6,
+      "buy": 25,
+      "hold": 15,
+      "sell": 1,
+      "strongSell": 1
+    }
+  ],
+  "actions": [
+    {
+      "gradedAt": "2026-03-05T13:56:15Z",
+      "firm": null,
+      "toGrade": null,
+      "fromGrade": null,
+      "action": null,
+      "priceTargetAction": "Maintains",
+      "currentPriceTarget": 350.0,
+      "priorPriceTarget": 350.0
+    }
+  ],
+  "dataLimitations": []
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 INVALID_SYMBOL`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/analyst/history"
+```
+
+### `GET /api/v1/tickers/{symbol}/ownership`
+
+Returns ownership and holder tables.
+
+**Path parameters**
+
+- `symbol` required
+
+**Behavior**
+
+- `majorHolders` is a normalized metric list, not a raw provider table.
+- `institutionalHolders`, `mutualFundHolders`, and `insiderRoster` are capped server-side to keep payloads bounded.
+- ETF and thinly covered symbols may have no material ownership tables and return `404 DATA_UNAVAILABLE`.
+
+**Response shape**
+
+```json
+{
+  "symbol": "AAPL",
+  "majorHolders": [
+    {
+      "key": "insidersPercentHeld",
+      "label": "Insiders Percent Held",
+      "value": 0.01637
+    }
+  ],
+  "institutionalHolders": [
+    {
+      "dateReported": "2025-12-31T00:00:00Z",
+      "holder": "Vanguard Group Inc",
+      "pctHeld": 0.097200006,
+      "shares": 1426283914,
+      "value": 356742125605,
+      "pctChange": 0.019199999
+    }
+  ],
+  "mutualFundHolders": [],
+  "insiderRoster": [],
+  "dataLimitations": [
+    "Mutual fund holders are unavailable from the data provider.",
+    "Insider roster is unavailable from the data provider."
+  ]
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 INVALID_SYMBOL`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/ownership"
+```
+
+### `GET /api/v1/tickers/{symbol}/options/expirations`
+
+Returns available option expiration dates for an optionable symbol.
+
+**Path parameters**
+
+- `symbol` required
+
+**Behavior**
+
+- Response is a flat list of ISO dates.
+- Non-optionable symbols return `404 DATA_UNAVAILABLE`.
+
+**Response shape**
+
+```json
+{
+  "symbol": "AAPL",
+  "expirations": ["2026-03-16", "2026-03-18", "2026-03-20"]
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 INVALID_SYMBOL`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/options/expirations"
+```
+
+### `GET /api/v1/tickers/{symbol}/options/chain`
+
+Returns a normalized call/put chain for a selected expiration.
+
+**Path parameters**
+
+- `symbol` required
+
+**Query parameters**
+
+- `expiration` required, `YYYY-MM-DD`
+
+**Behavior**
+
+- Invalid date format returns `400 VALIDATION_ERROR`.
+- Unsupported expirations for a valid symbol return `400 VALIDATION_ERROR` with `details.allowedExpirations`.
+- `underlyingPrice` is resolved from quote data and may be `null`.
+- Call and put arrays may be large for liquid symbols.
+
+**Response shape**
+
+```json
+{
+  "symbol": "AAPL",
+  "expiration": "2026-03-16",
+  "underlyingPrice": 250.12,
+  "calls": [
+    {
+      "contractSymbol": "AAPL260316C00250000",
+      "lastTradeDate": "2026-03-13T19:59:57Z",
+      "strike": 250.0,
+      "lastPrice": 2.06,
+      "bid": 2.11,
+      "ask": 2.23,
+      "change": -4.34,
+      "percentChange": -67.8125,
+      "volume": 6720,
+      "openInterest": 166,
+      "impliedVolatility": 0.23987576538085933,
+      "inTheMoney": true,
+      "contractSize": "REGULAR",
+      "currency": "USD"
+    }
+  ],
+  "puts": [],
+  "dataLimitations": [
+    "Put contracts are unavailable from the data provider."
+  ]
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 INVALID_SYMBOL`
+- `400 VALIDATION_ERROR`
+- `404 DATA_UNAVAILABLE`
+- `502 PROVIDER_ERROR`
+
+**Example**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/tickers/AAPL/options/chain?expiration=2026-03-16"
 ```
 
 ### `POST /api/v1/analytics/events`
@@ -955,6 +1462,83 @@ Returns full detail for a single curated sector key.
 curl "http://127.0.0.1:8000/api/v1/market/sectors/technology"
 ```
 
+### `GET /api/v1/market/industries/{industry_key}`
+
+Returns industry drill-down detail for an industry key discovered from a sector-detail response.
+
+**Path parameters**
+
+- `industry_key` required
+  - keys come from `GET /api/v1/market/sectors/{sector_key}` response `industries[].key`
+
+**Behavior**
+
+- Invalid or unsupported keys return `400 VALIDATION_ERROR`.
+- This endpoint is not based on a fixed allowlist; it is intended to follow the industry keys exposed by sector detail.
+- Some company names or ratings may be `null` when Yahoo omits them.
+
+**Response shape**
+
+```json
+{
+  "key": "software-infrastructure",
+  "name": "Software - Infrastructure",
+  "symbol": "^YH31110030",
+  "sectorKey": "technology",
+  "sectorName": "Technology",
+  "overview": {
+    "companiesCount": 196,
+    "marketCap": 4775130169344,
+    "messageBoardId": "INDEXYH31110030",
+    "description": "Companies that develop, design, support, and provide system software and services...",
+    "marketWeight": 0.21729653,
+    "employeeCount": 824379
+  },
+  "topCompanies": [
+    {
+      "symbol": "MSFT",
+      "name": "Microsoft Corporation",
+      "rating": "Strong Buy",
+      "marketWeight": 0.6156912
+    }
+  ],
+  "topGrowthCompanies": [
+    {
+      "symbol": "CFLT",
+      "name": "Confluent, Inc.",
+      "ytdReturn": 0.0142,
+      "growthEstimate": 5.5
+    }
+  ],
+  "topPerformingCompanies": [
+    {
+      "symbol": "TCGL",
+      "name": "TechCreate Group Ltd.",
+      "ytdReturn": 32.2385,
+      "lastPrice": 172.84,
+      "targetPrice": null
+    }
+  ],
+  "dataLimitations": []
+}
+```
+
+**Typical status codes**
+
+- `200 OK`
+- `400 VALIDATION_ERROR`
+- `502 PROVIDER_ERROR`
+
+**Examples**
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/market/industries/software-infrastructure"
+```
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/market/industries/not-a-real-industry"
+```
+
 ## Field Notes for Frontend Rendering
 
 - `dataLimitations`
@@ -966,9 +1550,12 @@ curl "http://127.0.0.1:8000/api/v1/market/sectors/technology"
 - History bars
   - Use `bars` from the history endpoint for charting.
   - The overview endpoint is not intended to drive charts.
+- Deeper ticker tables
+  - `financials/trends`, `earnings/*`, `analyst/*`, `ownership`, and `options/*` are richer research surfaces.
+  - Some of them are sparse or unavailable for ETFs even when quote/history endpoints work normally.
 - Chat `usedTools`
   - Useful for debugging, observability, or optional developer UI.
   - Do not treat an empty array as a failure.
 - Market endpoints
   - `market/movers` is short-lived discovery data and suitable for frequent refresh.
-  - `market/benchmarks`, `market/earnings-calendar`, and `market/sectors/*` are read-oriented discovery surfaces and may return partial data with stable response shapes.
+  - `market/benchmarks`, `market/earnings-calendar`, `market/sectors/*`, and `market/industries/*` are read-oriented discovery surfaces and may return partial data with stable response shapes.

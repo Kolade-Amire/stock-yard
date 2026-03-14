@@ -4,6 +4,7 @@ from app.core.dependencies import get_yfinance_service
 from app.schemas.market import (
     BenchmarkFundsResponse,
     EarningsCalendarResponse,
+    IndustryDetailResponse,
     MarketMoversResponse,
     SectorDetailResponse,
     SectorPulseResponse,
@@ -58,3 +59,11 @@ async def get_sector_detail(
     service: YFinanceService = Depends(get_yfinance_service),
 ) -> SectorDetailResponse:
     return await service.get_sector_detail(sector_key=sector_key)
+
+
+@router.get("/industries/{industry_key}", response_model=IndustryDetailResponse)
+async def get_industry_detail(
+    industry_key: str,
+    service: YFinanceService = Depends(get_yfinance_service),
+) -> IndustryDetailResponse:
+    return await service.get_industry_detail(industry_key=industry_key)
