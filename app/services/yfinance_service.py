@@ -1,10 +1,13 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from math import isfinite
-from typing import Any
+from typing import Any, Protocol, cast
 
 import yfinance as yf
+from curl_cffi.curl import CurlError
+from curl_cffi.requests.exceptions import RequestException
 from starlette.concurrency import run_in_threadpool
+from yfinance.exceptions import YFException
 
 from app.core.errors import ApiError
 from app.core.logging import get_logger
@@ -168,6 +171,26 @@ ALLOWED_HISTORY_PERIODS_BY_INTERVAL = {
     "1wk": ALLOWED_HISTORY_PERIODS,
     "1mo": ALLOWED_HISTORY_PERIODS,
 }
+
+
+class _SupportsIterrows(Protocol):
+    def iterrows(self) -> Iterable[tuple[Any, Any]]: ...
+
+
+YFINANCE_PROVIDER_EXCEPTIONS = (
+    YFException,
+    RequestException,
+    CurlError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    TypeError,
+    ValueError,
+    RuntimeError,
+)
+ROW_ACCESS_EXCEPTIONS = (AttributeError, KeyError, IndexError, TypeError)
+TO_PYDATETIME_EXCEPTIONS = (AttributeError, TypeError, ValueError, OSError, OverflowError)
+MAPPING_COERCION_EXCEPTIONS = (TypeError, ValueError)
 
 
 class YFinanceService:
@@ -569,7 +592,8 @@ class YFinanceService:
         self._options_chain_cache.set(cache_key, response)
         return response
 
-    def _normalize_and_validate_symbol(self, symbol: str) -> str:
+    @staticmethod
+    def _normalize_and_validate_symbol(symbol: str) -> str:
         normalized_symbol = normalize_symbol(symbol)
         if not is_valid_symbol(normalized_symbol):
             raise ApiError(
@@ -783,8 +807,8 @@ class YFinanceService:
             )
         return offset
 
+    @staticmethod
     def _validate_history_period_interval(
-        self,
         *,
         period: str,
         interval: str,
@@ -851,7 +875,7 @@ class YFinanceService:
         provider_screen = ALLOWED_MOVER_SCREENS[screen]
         try:
             payload = yf.screen(provider_screen, count=limit)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance movers fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -990,7 +1014,7 @@ class YFinanceService:
                     f"{symbol} benchmark fund data is unavailable from the data provider."
                 )
                 continue
-            except Exception as exc:
+            except YFINANCE_PROVIDER_EXCEPTIONS as exc:
                 self._logger.warning("Unexpected benchmark fund failure for %s: %s", symbol, exc)
                 top_level_limitations.append(
                     f"{symbol} benchmark fund data is unavailable due to a provider parsing error."
@@ -1030,7 +1054,7 @@ class YFinanceService:
     ) -> BenchmarkFund:
         try:
             ticker = yf.Ticker(symbol)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance benchmark ticker init failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -1047,19 +1071,19 @@ class YFinanceService:
 
         try:
             info = self._coerce_mapping(getattr(ticker, "info", {}))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning("Benchmark info fetch failed for %s: %s", symbol, exc)
             limitations.append("Quote metadata is unavailable from the data provider.")
 
         try:
             fast_info = self._coerce_mapping(getattr(ticker, "fast_info", {}))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning("Benchmark fast_info fetch failed for %s: %s", symbol, exc)
             limitations.append("Fast quote data is unavailable from the data provider.")
 
         try:
             funds_data = getattr(ticker, "funds_data", None)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning("Benchmark funds_data fetch failed for %s: %s", symbol, exc)
             limitations.append("Fund profile details are unavailable from the data provider.")
 
@@ -1146,38 +1170,40 @@ class YFinanceService:
             ),
         )
 
-        benchmark_fund = BenchmarkFund(
-            symbol=symbol,
-            benchmarkKey=benchmark_key,
-            benchmarkName=benchmark_name,
-            category=category,
-            displayName=first_non_null(
-                coerce_str(info.get("longName")),
-                coerce_str(info.get("shortName")),
-                coerce_str(info.get("displayName")),
-                symbol,
-            ),
-            currentPrice=current_price,
-            previousClose=previous_close,
-            dayChange=day_change,
-            dayChangePercent=day_change_percent,
-            currency=first_non_null(
-                coerce_str(info.get("currency")),
-                coerce_str(fast_info.get("currency")),
-            ),
-            expenseRatio=expense_ratio,
-            netAssets=net_assets,
-            yield_=first_non_null(
-                coerce_float(info.get("yield")),
-                coerce_float(info.get("trailingAnnualDividendYield")),
-            ),
-            fundFamily=first_non_null(
-                coerce_str(fund_overview.get("family")),
-                coerce_str(info.get("fundFamily")),
-            ),
-            topHoldings=top_holdings,
-            sectorWeights=sector_weights,
-            dataLimitations=[],
+        benchmark_fund = BenchmarkFund.model_validate(
+            {
+                "symbol": symbol,
+                "benchmarkKey": benchmark_key,
+                "benchmarkName": benchmark_name,
+                "category": category,
+                "displayName": first_non_null(
+                    coerce_str(info.get("longName")),
+                    coerce_str(info.get("shortName")),
+                    coerce_str(info.get("displayName")),
+                    symbol,
+                ),
+                "currentPrice": current_price,
+                "previousClose": previous_close,
+                "dayChange": day_change,
+                "dayChangePercent": day_change_percent,
+                "currency": first_non_null(
+                    coerce_str(info.get("currency")),
+                    coerce_str(fast_info.get("currency")),
+                ),
+                "expenseRatio": expense_ratio,
+                "netAssets": net_assets,
+                "yield_": first_non_null(
+                    coerce_float(info.get("yield")),
+                    coerce_float(info.get("trailingAnnualDividendYield")),
+                ),
+                "fundFamily": first_non_null(
+                    coerce_str(fund_overview.get("family")),
+                    coerce_str(info.get("fundFamily")),
+                ),
+                "topHoldings": top_holdings,
+                "sectorWeights": sector_weights,
+                "dataLimitations": [],
+            }
         )
 
         if self._benchmark_fund_has_no_material_data(benchmark_fund):
@@ -1221,7 +1247,7 @@ class YFinanceService:
                 offset=offset,
                 filter_most_active=active_only,
             )
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance earnings calendar fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -1252,8 +1278,8 @@ class YFinanceService:
 
         events: list[EarningsCalendarEvent] = []
         skipped_rows = 0
-        iterrows = getattr(raw_events, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(raw_events)
+        if rows is None:
             raise ApiError(
                 code="DATA_UNAVAILABLE",
                 message="Earnings calendar data is unavailable.",
@@ -1261,7 +1287,7 @@ class YFinanceService:
                 details={"start": start.isoformat(), "end": end.isoformat(), "offset": offset},
             )
 
-        for index, row in iterrows():
+        for index, row in rows:
             mapped_event = self._map_earnings_calendar_event(index=index, row=row)
             if mapped_event is None:
                 skipped_rows += 1
@@ -1314,7 +1340,7 @@ class YFinanceService:
                     f"{sector_key} sector data is unavailable from the data provider."
                 )
                 continue
-            except Exception as exc:
+            except YFINANCE_PROVIDER_EXCEPTIONS as exc:
                 self._logger.warning("Unexpected sector pulse failure for %s: %s", sector_key, exc)
                 top_level_limitations.append(
                     f"{sector_key} sector data is unavailable due to a provider parsing error."
@@ -1367,7 +1393,7 @@ class YFinanceService:
     def _build_sector_detail_sync(self, sector_key: str) -> SectorDetailResponse:
         try:
             sector = yf.Sector(sector_key)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance sector init failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -1384,7 +1410,7 @@ class YFinanceService:
             top_mutual_funds = self._map_sector_fund_references(sector.top_mutual_funds)
             top_companies = self._map_sector_company_references(sector.top_companies)
             industries = self._map_sector_industries(sector.industries)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance sector fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -1433,12 +1459,12 @@ class YFinanceService:
         return detail
 
     def _map_benchmark_holdings(self, payload: Any) -> list[BenchmarkHolding]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         holdings: list[BenchmarkHolding] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             symbol = normalize_symbol(
                 first_non_null(
@@ -1557,12 +1583,12 @@ class YFinanceService:
         self,
         payload: Any,
     ) -> list[SectorCompanyReference]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         companies: list[SectorCompanyReference] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             symbol = normalize_symbol(
                 first_non_null(
@@ -1593,12 +1619,12 @@ class YFinanceService:
         self,
         payload: Any,
     ) -> list[SectorIndustryReference]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         industries: list[SectorIndustryReference] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             key = coerce_str(index)
             if key is None:
@@ -1688,7 +1714,7 @@ class YFinanceService:
 
         try:
             row = loc[row_label]
-        except Exception:
+        except ROW_ACCESS_EXCEPTIONS:
             return None
 
         row_mapping = self._coerce_mapping(row)
@@ -1729,7 +1755,7 @@ class YFinanceService:
         elif hasattr(value, "to_pydatetime"):
             try:
                 parsed = value.to_pydatetime()
-            except Exception:
+            except TO_PYDATETIME_EXCEPTIONS:
                 parsed = None
             if isinstance(parsed, datetime):
                 dt_value = parsed
@@ -1780,7 +1806,7 @@ class YFinanceService:
     ) -> Any:
         try:
             return getattr(payload, attribute, None)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning("Benchmark %s fetch failed for %s: %s", attribute, symbol, exc)
             limitations.append(failure_message)
             return None
@@ -1834,13 +1860,19 @@ class YFinanceService:
 
     def _fetch_search_quotes(self, *, query: str, limit: int) -> list[dict[str, Any]]:
         try:
-            if hasattr(yf, "Search"):
-                search = yf.Search(query, max_results=limit, news_count=0)
+            search_factory = getattr(yf, "Search", None)
+            if callable(search_factory):
+                typed_search_factory = cast(Any, search_factory)
+                search = typed_search_factory(query, max_results=limit, news_count=0)
                 quotes = getattr(search, "quotes", [])
             else:
-                payload = yf.search(query, max_results=limit, news_count=0)
+                search_function = getattr(yf, "search", None)
+                if not callable(search_function):
+                    raise RuntimeError("yfinance search API is unavailable.")
+                typed_search_function = cast(Any, search_function)
+                payload = typed_search_function(query, max_results=limit, news_count=0)
                 quotes = payload.get("quotes", []) if isinstance(payload, dict) else []
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance search failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -1852,7 +1884,8 @@ class YFinanceService:
             return []
         return [item for item in quotes if isinstance(item, dict)]
 
-    def _map_search_result(self, quote: dict[str, Any]) -> TickerSearchResult | None:
+    @staticmethod
+    def _map_search_result(quote: dict[str, Any]) -> TickerSearchResult | None:
         raw_symbol = coerce_str(quote.get("symbol"))
         if raw_symbol is None:
             return None
@@ -1891,7 +1924,7 @@ class YFinanceService:
             ticker = yf.Ticker(symbol)
             info = self._coerce_mapping(getattr(ticker, "info", {}))
             fast_info = self._coerce_mapping(getattr(ticker, "fast_info", {}))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance overview fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -1928,7 +1961,7 @@ class YFinanceService:
         try:
             ticker = yf.Ticker(symbol)
             raw_news = ticker.get_news()
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance news fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -1956,7 +1989,7 @@ class YFinanceService:
             try:
                 info = self._coerce_mapping(getattr(ticker, "info", {}))
                 fast_info = self._coerce_mapping(getattr(ticker, "fast_info", {}))
-            except Exception as exc:
+            except YFINANCE_PROVIDER_EXCEPTIONS as exc:
                 self._logger.exception("yfinance metadata fetch failed", exc_info=exc)
                 raise ApiError(
                     code="PROVIDER_ERROR",
@@ -1985,7 +2018,7 @@ class YFinanceService:
             ticker = yf.Ticker(symbol)
             info = self._coerce_mapping(getattr(ticker, "info", {}))
             fast_info = self._coerce_mapping(getattr(ticker, "fast_info", {}))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance financial fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2014,7 +2047,7 @@ class YFinanceService:
         try:
             ticker = yf.Ticker(symbol)
             info = self._coerce_mapping(getattr(ticker, "info", {}))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance earnings fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2037,7 +2070,7 @@ class YFinanceService:
             limitations.append(
                 "Detailed earnings-date history is unavailable because optional parsers are missing."
             )
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning(
                 "yfinance earnings_dates fetch failed for %s: %s",
                 symbol,
@@ -2050,7 +2083,7 @@ class YFinanceService:
             calendar_data = self._coerce_mapping(ticker.get_calendar())
             if calendar_data:
                 data_sources.append("calendar")
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning("yfinance calendar fetch failed for %s: %s", symbol, exc)
             limitations.append("Earnings calendar details are unavailable from the data provider.")
 
@@ -2102,7 +2135,7 @@ class YFinanceService:
         try:
             ticker = yf.Ticker(symbol)
             info = self._coerce_mapping(getattr(ticker, "info", {}))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance analyst fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2116,7 +2149,7 @@ class YFinanceService:
         price_targets: dict[str, Any] = {}
         try:
             price_targets = self._coerce_mapping(ticker.get_analyst_price_targets())
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning("yfinance analyst_price_targets fetch failed for %s: %s", symbol, exc)
             limitations.append("Analyst price targets are unavailable from the data provider.")
 
@@ -2126,7 +2159,7 @@ class YFinanceService:
             raw_recommendations = ticker.get_recommendations_summary()
             recommendation_snapshot = self._extract_recommendation_snapshot(raw_recommendations)
             recommendation_populated = self._recommendation_has_material_data(recommendation_snapshot)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning(
                 "yfinance recommendations_summary fetch failed for %s: %s",
                 symbol,
@@ -2138,7 +2171,7 @@ class YFinanceService:
         try:
             raw_actions = ticker.get_upgrades_downgrades()
             recent_actions = self._extract_recent_analyst_actions(raw_actions)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning("yfinance upgrades_downgrades fetch failed for %s: %s", symbol, exc)
             limitations.append("Recent analyst action history is unavailable from the data provider.")
 
@@ -2199,7 +2232,7 @@ class YFinanceService:
                 interval=interval,
                 auto_adjust=False,
             )
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance history fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2231,12 +2264,12 @@ class YFinanceService:
         if getattr(history, "empty", False):
             return []
 
-        iterrows = getattr(history, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(history)
+        if rows is None:
             return []
 
         bars: list[PriceBar] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
 
             open_price = self._coerce_finite_float(row_mapping.get("Open"))
@@ -2282,7 +2315,7 @@ class YFinanceService:
         elif hasattr(value, "to_pydatetime"):
             try:
                 parsed = value.to_pydatetime()
-            except Exception:
+            except TO_PYDATETIME_EXCEPTIONS:
                 parsed = None
             if isinstance(parsed, datetime):
                 dt_value = parsed
@@ -2331,12 +2364,24 @@ class YFinanceService:
         if hasattr(payload, "items"):
             try:
                 return dict(payload.items())
-            except Exception:
+            except MAPPING_COERCION_EXCEPTIONS:
                 return {}
+        if isinstance(payload, Iterable):
+            try:
+                return dict(payload)
+            except MAPPING_COERCION_EXCEPTIONS:
+                return {}
+        return {}
+
+    @staticmethod
+    def _get_iterrows(payload: Any) -> Iterable[tuple[Any, Any]] | None:
         try:
-            return dict(payload)
-        except Exception:
-            return {}
+            rows = cast(_SupportsIterrows, payload).iterrows()
+        except (AttributeError, TypeError):
+            return None
+        if not isinstance(rows, Iterable):
+            return None
+        return rows
 
     @staticmethod
     def _coerce_optional_text(value: Any) -> str | None:
@@ -2364,7 +2409,7 @@ class YFinanceService:
             top_performing_companies = self._map_industry_performing_companies(
                 getattr(industry, "top_performing_companies", None)
             )
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance industry fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2418,7 +2463,7 @@ class YFinanceService:
             quarterly_income_stmt = getattr(ticker, "quarterly_income_stmt", None)
             annual_cash_flow = getattr(ticker, "cash_flow", None)
             quarterly_cash_flow = getattr(ticker, "quarterly_cash_flow", None)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance financial trends fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2461,7 +2506,7 @@ class YFinanceService:
         try:
             ticker = yf.Ticker(symbol)
             payload = getattr(ticker, "earnings_history", None)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance earnings history fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2487,7 +2532,7 @@ class YFinanceService:
             raw_eps_estimates = getattr(ticker, "earnings_estimate", None)
             raw_revenue_estimates = getattr(ticker, "revenue_estimate", None)
             raw_growth_estimates = getattr(ticker, "growth_estimates", None)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance earnings estimates fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2605,12 +2650,12 @@ class YFinanceService:
         self,
         payload: Any,
     ) -> list[IndustryCompanyReference]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         companies: list[IndustryCompanyReference] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             symbol = normalize_symbol(
                 first_non_null(coerce_str(index), coerce_str(row_mapping.get("symbol"))) or ""
@@ -2636,12 +2681,12 @@ class YFinanceService:
         self,
         payload: Any,
     ) -> list[IndustryGrowthCompanyReference]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         companies: list[IndustryGrowthCompanyReference] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             symbol = normalize_symbol(
                 first_non_null(coerce_str(index), coerce_str(row_mapping.get("symbol"))) or ""
@@ -2669,12 +2714,12 @@ class YFinanceService:
         self,
         payload: Any,
     ) -> list[IndustryPerformingCompanyReference]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         companies: list[IndustryPerformingCompanyReference] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             symbol = normalize_symbol(
                 first_non_null(coerce_str(index), coerce_str(row_mapping.get("symbol"))) or ""
@@ -2798,7 +2843,7 @@ class YFinanceService:
 
         try:
             row = loc[row_label]
-        except Exception:
+        except ROW_ACCESS_EXCEPTIONS:
             return {}
 
         row_mapping = self._coerce_mapping(row)
@@ -2812,12 +2857,12 @@ class YFinanceService:
         return values
 
     def _map_earnings_history_events(self, payload: Any) -> list[EarningsHistoryEvent]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         events: list[EarningsHistoryEvent] = []
-        for index, row in iterrows():
+        for index, row in rows:
             report_date = self._coerce_period_end(index)
             row_mapping = self._coerce_mapping(row)
             if report_date is None:
@@ -2836,12 +2881,12 @@ class YFinanceService:
         return events
 
     def _map_earnings_estimate_points(self, payload: Any) -> list[EarningsEstimatePoint]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         points: list[EarningsEstimatePoint] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             period = coerce_str(index)
             if period is None:
@@ -2862,12 +2907,12 @@ class YFinanceService:
         return points
 
     def _map_revenue_estimate_points(self, payload: Any) -> list[RevenueEstimatePoint]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         points: list[RevenueEstimatePoint] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             period = coerce_str(index)
             if period is None:
@@ -2888,12 +2933,12 @@ class YFinanceService:
         return points
 
     def _map_growth_estimate_points(self, payload: Any) -> list[GrowthEstimatePoint]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         points: list[GrowthEstimatePoint] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             period = coerce_str(index)
             if period is None:
@@ -2911,7 +2956,7 @@ class YFinanceService:
         try:
             ticker = yf.Ticker(symbol)
             info = self._coerce_mapping(getattr(ticker, "info", {}))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance analyst summary fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -2924,7 +2969,7 @@ class YFinanceService:
 
         try:
             price_targets = self._coerce_mapping(ticker.get_analyst_price_targets())
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning(
                 "yfinance analyst_price_targets fetch failed for %s: %s",
                 symbol,
@@ -2936,7 +2981,7 @@ class YFinanceService:
         try:
             raw_recommendations = ticker.get_recommendations_summary()
             recommendation_snapshot = self._extract_recommendation_snapshot(raw_recommendations)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning(
                 "yfinance recommendations_summary fetch failed for %s: %s",
                 symbol,
@@ -2948,7 +2993,7 @@ class YFinanceService:
         try:
             raw_actions = ticker.get_upgrades_downgrades()
             recent_action_count = self._count_recent_analyst_actions(raw_actions)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning(
                 "yfinance upgrades_downgrades fetch failed for %s: %s",
                 symbol,
@@ -3004,7 +3049,7 @@ class YFinanceService:
     def _get_analyst_history_sync(self, symbol: str) -> AnalystHistoryResponse:
         try:
             ticker = yf.Ticker(symbol)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance analyst history init failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -3018,7 +3063,7 @@ class YFinanceService:
         try:
             raw_recommendations = getattr(ticker, "recommendations", None)
             recommendation_history = self._extract_recommendation_history(raw_recommendations)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning("yfinance recommendations fetch failed for %s: %s", symbol, exc)
             recommendation_history = []
             limitations.append("Analyst recommendation history is unavailable from the data provider.")
@@ -3026,7 +3071,7 @@ class YFinanceService:
         try:
             raw_actions = ticker.get_upgrades_downgrades()
             actions = self._extract_analyst_history_actions(raw_actions)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.warning(
                 "yfinance upgrades_downgrades history fetch failed for %s: %s",
                 symbol,
@@ -3063,7 +3108,7 @@ class YFinanceService:
             institutional_holders = getattr(ticker, "institutional_holders", None)
             mutualfund_holders = getattr(ticker, "mutualfund_holders", None)
             insider_roster = getattr(ticker, "insider_roster_holders", None)
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance ownership fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -3166,7 +3211,7 @@ class YFinanceService:
         try:
             ticker = yf.Ticker(symbol)
             expirations = getattr(ticker, "options", ())
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance options expirations fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -3194,7 +3239,7 @@ class YFinanceService:
         try:
             ticker = yf.Ticker(symbol)
             expirations = tuple(getattr(ticker, "options", ()))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance options chain init failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -3223,7 +3268,7 @@ class YFinanceService:
             chain = ticker.option_chain(expiration)
             fast_info = self._coerce_mapping(getattr(ticker, "fast_info", {}))
             info = self._coerce_mapping(getattr(ticker, "info", {}))
-        except Exception as exc:
+        except YFINANCE_PROVIDER_EXCEPTIONS as exc:
             self._logger.exception("yfinance options chain fetch failed", exc_info=exc)
             raise ApiError(
                 code="PROVIDER_ERROR",
@@ -3299,7 +3344,7 @@ class YFinanceService:
         if hasattr(value, "to_pydatetime"):
             try:
                 parsed = value.to_pydatetime()
-            except Exception:
+            except TO_PYDATETIME_EXCEPTIONS:
                 parsed = None
             if isinstance(parsed, datetime):
                 return parsed.date().isoformat()
@@ -3349,8 +3394,8 @@ class YFinanceService:
             )
         )
 
+    @staticmethod
     def _build_public_recommendation_breakdown(
-        self,
         payload: AnalystRecommendationSnapshot,
     ) -> AnalystRecommendationBreakdown:
         return AnalystRecommendationBreakdown(
@@ -3366,12 +3411,12 @@ class YFinanceService:
         self,
         payload: Any,
     ) -> list[AnalystRecommendationBreakdown]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         history: list[AnalystRecommendationBreakdown] = []
-        for _, row in iterrows():
+        for _, row in rows:
             row_mapping = self._coerce_mapping(row)
             item = AnalystRecommendationBreakdown(
                 period=coerce_str(row_mapping.get("period")),
@@ -3389,14 +3434,14 @@ class YFinanceService:
         self,
         payload: Any,
     ) -> list[AnalystActionTimelineEvent]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         threshold = datetime.now(tz=timezone.utc) - timedelta(days=ANALYST_ACTION_WINDOW_DAYS)
         actions: list[tuple[datetime, AnalystActionTimelineEvent]] = []
 
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             graded_at = first_non_null(
                 coerce_datetime_string(index),
@@ -3424,13 +3469,13 @@ class YFinanceService:
         return [action for _, action in actions[:MAX_ANALYST_HISTORY_ACTION_EVENTS]]
 
     def _count_recent_analyst_actions(self, payload: Any) -> int:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return 0
 
         threshold = datetime.now(tz=timezone.utc) - timedelta(days=ANALYST_ACTION_WINDOW_DAYS)
         count = 0
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             graded_at = first_non_null(
                 coerce_datetime_string(index),
@@ -3444,12 +3489,12 @@ class YFinanceService:
         return count
 
     def _map_major_holder_metrics(self, payload: Any) -> list[MajorHolderMetric]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         metrics: list[MajorHolderMetric] = []
-        for index, row in iterrows():
+        for index, row in rows:
             row_mapping = self._coerce_mapping(row)
             key = coerce_str(index)
             if key is None:
@@ -3464,12 +3509,12 @@ class YFinanceService:
         return metrics
 
     def _map_holder_entries(self, payload: Any) -> list[HolderEntry]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         holders: list[HolderEntry] = []
-        for _, row in iterrows():
+        for _, row in rows:
             row_mapping = self._coerce_mapping(row)
             entry = HolderEntry(
                 dateReported=self._coerce_calendar_timestamp(row_mapping.get("Date Reported")),
@@ -3490,12 +3535,12 @@ class YFinanceService:
         return holders
 
     def _map_insider_roster_entries(self, payload: Any) -> list[InsiderRosterEntry]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         entries: list[InsiderRosterEntry] = []
-        for _, row in iterrows():
+        for _, row in rows:
             row_mapping = self._coerce_mapping(row)
             entry = InsiderRosterEntry(
                 name=coerce_str(row_mapping.get("Name")),
@@ -3547,12 +3592,12 @@ class YFinanceService:
         )
 
     def _map_option_contracts(self, payload: Any) -> list[OptionContract]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         contracts: list[OptionContract] = []
-        for _, row in iterrows():
+        for _, row in rows:
             row_mapping = self._coerce_mapping(row)
             contract_symbol = coerce_str(row_mapping.get("contractSymbol"))
             if contract_symbol is None:
@@ -3604,8 +3649,8 @@ class YFinanceService:
             and not response.insiderRoster
         )
 
+    @staticmethod
     def _build_overview(
-        self,
         *,
         symbol: str,
         info: dict[str, Any],
@@ -3703,8 +3748,8 @@ class YFinanceService:
             is_etf=is_etf,
         )
 
+    @staticmethod
     def _build_financial_summary(
-        self,
         *,
         info: dict[str, Any],
         fast_info: dict[str, Any],
@@ -3815,11 +3860,11 @@ class YFinanceService:
     def _extract_earnings_dates(self, payload: Any) -> list[str]:
         parsed_dates: list[str] = []
 
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return parsed_dates
 
-        for row_index, row in iterrows():
+        for row_index, row in rows:
             row_mapping = self._coerce_mapping(row)
             row_date = first_non_null(
                 coerce_datetime_string(row_mapping.get("Earnings Date")),
@@ -3846,12 +3891,12 @@ class YFinanceService:
         return [value for value in parsed_dates if value is not None]
 
     def _extract_recommendation_snapshot(self, payload: Any) -> AnalystRecommendationSnapshot:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return AnalystRecommendationSnapshot()
 
         candidates: list[dict[str, Any]] = []
-        for _index, row in iterrows():
+        for _index, row in rows:
             row_mapping = self._coerce_mapping(row)
             if row_mapping:
                 candidates.append(row_mapping)
@@ -3873,14 +3918,14 @@ class YFinanceService:
         )
 
     def _extract_recent_analyst_actions(self, payload: Any) -> list[AnalystActionEvent]:
-        iterrows = getattr(payload, "iterrows", None)
-        if not callable(iterrows):
+        rows = self._get_iterrows(payload)
+        if rows is None:
             return []
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=ANALYST_ACTION_WINDOW_DAYS)
         parsed_events: list[tuple[datetime | None, AnalystActionEvent]] = []
 
-        for row_index, row in iterrows():
+        for row_index, row in rows:
             row_mapping = self._coerce_mapping(row)
             graded_at = first_non_null(
                 coerce_datetime_string(row_mapping.get("GradeDate")),

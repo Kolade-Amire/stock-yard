@@ -357,8 +357,8 @@ class ChatService:
     def _clip_conversation(self, conversation: list[ChatTurn]) -> list[ChatTurn]:
         return conversation[-self._max_turns :]
 
+    @staticmethod
     def _build_messages(
-        self,
         *,
         clipped_turns: list[ChatTurn],
         current_message: str,
