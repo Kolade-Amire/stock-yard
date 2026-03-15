@@ -160,16 +160,26 @@ MAX_NEWS_LIMIT = 50
 EARNINGS_DATES_LIMIT = 8
 ANALYST_ACTION_WINDOW_DAYS = 90
 MAX_ANALYST_ACTION_EVENTS = 5
-ALLOWED_HISTORY_PERIODS = frozenset({"1d", "5d", "1mo", "3mo", "6mo", "1y", "5y", "max"})
-ALLOWED_HISTORY_INTERVALS = frozenset({"1m", "5m", "15m", "1h", "1d", "1wk", "1mo"})
+ALLOWED_HISTORY_PERIODS = frozenset(
+    {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
+)
+ALLOWED_HISTORY_INTERVALS = frozenset(
+    {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+)
 ALLOWED_HISTORY_PERIODS_BY_INTERVAL = {
     "1m": frozenset({"1d", "5d"}),
+    "2m": frozenset({"1d", "5d", "1mo"}),
     "5m": frozenset({"1d", "5d", "1mo"}),
     "15m": frozenset({"1d", "5d", "1mo"}),
+    "30m": frozenset({"1d", "5d", "1mo"}),
+    "60m": frozenset({"1d", "5d", "1mo"}),
+    "90m": frozenset({"1d", "5d", "1mo"}),
     "1h": frozenset({"1d", "5d", "1mo"}),
     "1d": ALLOWED_HISTORY_PERIODS,
+    "5d": ALLOWED_HISTORY_PERIODS,
     "1wk": ALLOWED_HISTORY_PERIODS,
     "1mo": ALLOWED_HISTORY_PERIODS,
+    "3mo": ALLOWED_HISTORY_PERIODS,
 }
 
 

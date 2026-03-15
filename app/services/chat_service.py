@@ -29,8 +29,22 @@ MAX_NEWS_TOOL_LIMIT = 10
 MAX_CHAT_SESSION_ID_LENGTH = 128
 TOOL_GATING_MODE_BALANCED = "balanced"
 
-ALLOWED_HISTORY_PERIODS = ("1d", "5d", "1mo", "3mo", "6mo", "1y", "5y", "max")
-ALLOWED_HISTORY_INTERVALS = ("1m", "5m", "15m", "1h", "1d", "1wk", "1mo")
+ALLOWED_HISTORY_PERIODS = ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max")
+ALLOWED_HISTORY_INTERVALS = (
+    "1m",
+    "2m",
+    "5m",
+    "15m",
+    "30m",
+    "60m",
+    "90m",
+    "1h",
+    "1d",
+    "5d",
+    "1wk",
+    "1mo",
+    "3mo",
+)
 
 OUTLOOK_FALLBACK_TOOL_NAMES = (
     "get_stock_snapshot",

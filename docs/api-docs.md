@@ -210,17 +210,17 @@ Returns normalized OHLCV chart history for a curated set of periods and interval
 **Query parameters**
 
 - `period` required
-  - allowed: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `5y`, `max`
+  - allowed: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `10y`, `ytd`, `max`
 - `interval` required
-  - allowed: `1m`, `5m`, `15m`, `1h`, `1d`, `1wk`, `1mo`
+  - allowed: `1m`, `2m`, `5m`, `15m`, `30m`, `60m`, `90m`, `1h`, `1d`, `5d`, `1wk`, `1mo`, `3mo`
 
 **Behavior**
 
 - Unsupported period/interval combinations return `400 INVALID_PERIOD_INTERVAL`.
 - Intraday combinations are restricted:
   - `1m`: `1d`, `5d`
-  - `5m`, `15m`, `1h`: `1d`, `5d`, `1mo`
-  - `1d`, `1wk`, `1mo`: all curated periods
+  - `2m`, `5m`, `15m`, `30m`, `60m`, `90m`, `1h`: `1d`, `5d`, `1mo`
+  - `1d`, `5d`, `1wk`, `1mo`, `3mo`: all curated periods
 - Bars are sorted ascending by timestamp.
 - Rows missing OHLC values are dropped.
 - Timestamps are returned as ISO-8601 UTC strings ending in `Z`.
