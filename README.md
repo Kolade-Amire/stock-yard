@@ -38,3 +38,5 @@ untrusted `X-Forwarded-For` headers. Leave it `false` for local development or d
 ```bash
 curl http://127.0.0.1:8000/api/v1/health
 ```
+
+- API integration reference: [docs/api-docs.md](docs/api-docs.md)
