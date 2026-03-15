@@ -275,6 +275,7 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
             news_tool_default_limit=3,
             session_ttl_seconds=1800,
             session_max_tool_entries=16,
+            session_max_sessions=1024,
             memo_ttl_overview_seconds=300,
             memo_ttl_history_seconds=300,
             memo_ttl_news_seconds=900,
@@ -285,12 +286,7 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def _metrics_snapshot(self) -> dict[str, Any]:
-        return self.service._memo_metrics.record_request(
-            cached_context_tool_names=[],
-            cached_context_satisfied=False,
-            memo_hit_tool_names=[],
-            cold_miss_tool_names=[],
-        )
+        return self.service._memo_metrics.snapshot()
 
     async def test_chat_creates_session_and_records_cold_miss(self) -> None:
         response = await self.service.chat(
@@ -308,7 +304,7 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.yfinance.call_counts["earnings_estimates"], 1)
 
         metrics = self._metrics_snapshot()
-        self.assertEqual(metrics["requests"], 2)
+        self.assertEqual(metrics["requests"], 1)
         self.assertEqual(metrics["cachedContextAvailableRequests"], 0)
         self.assertEqual(metrics["cachedContextSatisfiedRequests"], 0)
         self.assertEqual(metrics["memoHits"], 0)
@@ -344,6 +340,7 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.yfinance.call_counts["earnings_estimates"], 1)
 
         metrics = self._metrics_snapshot()
+        self.assertEqual(metrics["requests"], 2)
         self.assertEqual(metrics["cachedContextAvailableRequests"], 1)
         self.assertEqual(metrics["cachedContextSatisfiedRequests"], 1)
         self.assertEqual(
@@ -380,6 +377,7 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.yfinance.call_counts["earnings_estimates"], 1)
 
         metrics = self._metrics_snapshot()
+        self.assertEqual(metrics["requests"], 2)
         self.assertEqual(metrics["memoHits"], 1)
         self.assertEqual(metrics["coldMisses"], 1)
         self.assertEqual(metrics["perTool"]["get_earnings_deep_context"]["memoHits"], 1)
@@ -407,6 +405,51 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.yfinance.call_counts["earnings_history"], 2)
         self.assertEqual(self.yfinance.call_counts["earnings_estimates"], 2)
 
+    async def test_chat_evicts_old_sessions_when_session_cap_is_exceeded(self) -> None:
+        constrained_service = ChatService(
+            yfinance_service=self.yfinance,
+            llm_provider=self.llm,
+            max_turns=6,
+            max_tool_call_rounds=2,
+            history_recent_bars_limit=12,
+            news_tool_default_limit=3,
+            session_ttl_seconds=1800,
+            session_max_tool_entries=16,
+            session_max_sessions=2,
+            memo_ttl_overview_seconds=300,
+            memo_ttl_history_seconds=300,
+            memo_ttl_news_seconds=900,
+            memo_ttl_financials_seconds=3600,
+            memo_ttl_earnings_seconds=3600,
+            memo_ttl_analyst_seconds=3600,
+            tool_gating_mode="balanced",
+        )
+        first = await constrained_service.chat(
+            ChatRequest(symbol="AAPL", message="Have they been beating earnings lately and what are estimates now?", conversation=[])
+        )
+        second = await constrained_service.chat(
+            ChatRequest(symbol="MSFT", message="Have they been beating earnings lately and what are estimates now?", conversation=[])
+        )
+        third = await constrained_service.chat(
+            ChatRequest(symbol="NVDA", message="Have they been beating earnings lately and what are estimates now?", conversation=[])
+        )
+
+        self.assertNotIn(first.sessionId, constrained_service._session_store._sessions)
+        self.assertIn(second.sessionId, constrained_service._session_store._sessions)
+        self.assertIn(third.sessionId, constrained_service._session_store._sessions)
+        self.assertEqual(len(constrained_service._session_store._sessions), 2)
+
+        replay = await constrained_service.chat(
+            ChatRequest(
+                symbol="AAPL",
+                sessionId=first.sessionId,
+                message="Have they been beating earnings lately and what are estimates now?",
+                conversation=[],
+            )
+        )
+
+        self.assertNotEqual(replay.sessionId, first.sessionId)
+
     async def test_chat_normalizes_tool_arguments_for_memo_keys(self) -> None:
         first = await self.service.chat(
             ChatRequest(
@@ -430,6 +473,7 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.yfinance.call_counts["history"], 1)
 
         metrics = self._metrics_snapshot()
+        self.assertEqual(metrics["requests"], 2)
         self.assertEqual(metrics["memoHits"], 1)
         self.assertEqual(metrics["perTool"]["get_price_history"]["memoHits"], 1)
 
@@ -465,7 +509,7 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
 
         metrics = self._metrics_snapshot()
         earnings_metrics = metrics["perTool"]["get_earnings_deep_context"]
-        self.assertGreaterEqual(metrics["requests"], 4)
+        self.assertEqual(metrics["requests"], 3)
         self.assertEqual(metrics["cachedContextAvailableRequests"], 2)
         self.assertEqual(metrics["cachedContextSatisfiedRequests"], 1)
         self.assertEqual(metrics["memoHits"], 1)

@@ -25,6 +25,7 @@ DEFAULT_HISTORY_RECENT_BARS_LIMIT = 12
 DEFAULT_NEWS_TOOL_LIMIT = 3
 DEFAULT_CHAT_SESSION_TTL_SECONDS = 1800
 DEFAULT_CHAT_SESSION_MAX_TOOL_ENTRIES = 16
+DEFAULT_CHAT_SESSION_MAX_SESSIONS = 1024
 MAX_NEWS_TOOL_LIMIT = 10
 MAX_CHAT_SESSION_ID_LENGTH = 128
 TOOL_GATING_MODE_BALANCED = "balanced"
@@ -178,17 +179,11 @@ class ChatMemoMetrics:
                 counts = self._per_tool_counts_locked(tool_name)
                 counts["coldMisses"] += 1
 
-            return {
-                "requests": self._requests_total,
-                "cachedContextAvailableRequests": self._requests_with_cached_context,
-                "cachedContextSatisfiedRequests": self._requests_cached_context_satisfied,
-                "memoHits": self._memo_hits_total,
-                "coldMisses": self._cold_misses_total,
-                "perTool": {
-                    tool_name: dict(counts)
-                    for tool_name, counts in sorted(self._per_tool.items())
-                },
-            }
+            return self._snapshot_locked()
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return self._snapshot_locked()
 
     def _per_tool_counts_locked(self, tool_name: str) -> dict[str, int]:
         counts = self._per_tool.get(tool_name)
@@ -202,11 +197,31 @@ class ChatMemoMetrics:
             self._per_tool[tool_name] = counts
         return counts
 
+    def _snapshot_locked(self) -> dict[str, Any]:
+        return {
+            "requests": self._requests_total,
+            "cachedContextAvailableRequests": self._requests_with_cached_context,
+            "cachedContextSatisfiedRequests": self._requests_cached_context_satisfied,
+            "memoHits": self._memo_hits_total,
+            "coldMisses": self._cold_misses_total,
+            "perTool": {
+                tool_name: dict(counts)
+                for tool_name, counts in sorted(self._per_tool.items())
+            },
+        }
+
 
 class ChatSessionStore:
-    def __init__(self, *, session_ttl_seconds: int, max_tool_entries: int) -> None:
+    def __init__(
+        self,
+        *,
+        session_ttl_seconds: int,
+        max_tool_entries: int,
+        max_sessions: int,
+    ) -> None:
         self._session_ttl_seconds = max(1, session_ttl_seconds)
         self._max_tool_entries = max(1, max_tool_entries)
+        self._max_sessions = max(1, max_sessions)
         self._sessions: dict[str, ChatSessionState] = {}
         self._lock = Lock()
 
@@ -226,6 +241,7 @@ class ChatSessionStore:
                 expires_at=now + self._session_ttl_seconds,
                 tool_entries={},
             )
+            self._enforce_max_sessions_locked(now)
             return session_id
 
     def get_entry(
@@ -270,6 +286,7 @@ class ChatSessionStore:
             state.expires_at = now + self._session_ttl_seconds
             state.tool_entries.pop(entry.tool_key, None)
             state.tool_entries[entry.tool_key] = entry
+            self._enforce_max_sessions_locked(now)
 
             while len(state.tool_entries) > self._max_tool_entries:
                 oldest_key = next(iter(state.tool_entries))
@@ -338,6 +355,15 @@ class ChatSessionStore:
         ]
         for session_id in expired_session_ids:
             self._sessions.pop(session_id, None)
+
+    def _enforce_max_sessions_locked(self, now: float) -> None:
+        self._evict_expired_sessions_locked(now)
+        while len(self._sessions) > self._max_sessions:
+            oldest_session_id = min(
+                self._sessions.items(),
+                key=lambda item: item[1].expires_at,
+            )[0]
+            self._sessions.pop(oldest_session_id, None)
 
 
 INTENT_CATALOG: dict[str, IntentDefinition] = {
@@ -552,6 +578,7 @@ class ChatService:
         news_tool_default_limit: int = DEFAULT_NEWS_TOOL_LIMIT,
         session_ttl_seconds: int = DEFAULT_CHAT_SESSION_TTL_SECONDS,
         session_max_tool_entries: int = DEFAULT_CHAT_SESSION_MAX_TOOL_ENTRIES,
+        session_max_sessions: int = DEFAULT_CHAT_SESSION_MAX_SESSIONS,
         memo_ttl_overview_seconds: int = DEFAULT_MEMO_TTL_BY_TOOL["get_stock_snapshot"],
         memo_ttl_history_seconds: int = DEFAULT_MEMO_TTL_BY_TOOL["get_price_history"],
         memo_ttl_news_seconds: int = DEFAULT_MEMO_TTL_BY_TOOL["get_news_context"],
@@ -571,6 +598,7 @@ class ChatService:
         self._session_store = ChatSessionStore(
             session_ttl_seconds=session_ttl_seconds,
             max_tool_entries=session_max_tool_entries,
+            max_sessions=session_max_sessions,
         )
         self._memo_metrics = ChatMemoMetrics()
         self._memo_ttl_by_tool = {

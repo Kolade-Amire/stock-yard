@@ -49,6 +49,12 @@ class Settings(BaseSettings):
         ge=1,
         le=100,
     )
+    chat_session_max_sessions: int = Field(
+        default=1024,
+        alias="CHAT_SESSION_MAX_SESSIONS",
+        ge=1,
+        le=100_000,
+    )
     chat_tool_gating_mode: str = Field(
         default="balanced",
         alias="CHAT_TOOL_GATING_MODE",

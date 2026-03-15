@@ -93,6 +93,7 @@ def get_chat_service() -> ChatService:
         news_tool_default_limit=settings.chat_news_tool_default_limit,
         session_ttl_seconds=settings.chat_session_ttl_seconds,
         session_max_tool_entries=settings.chat_session_max_tool_entries,
+        session_max_sessions=settings.chat_session_max_sessions,
         memo_ttl_overview_seconds=settings.cache_ttl_overview_seconds,
         memo_ttl_history_seconds=settings.cache_ttl_history_seconds,
         memo_ttl_news_seconds=settings.cache_ttl_news_seconds,

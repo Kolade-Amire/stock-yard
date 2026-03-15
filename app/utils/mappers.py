@@ -1,6 +1,14 @@
 from datetime import date, datetime, timezone
 from typing import Any
 
+DATETIME_COERCION_EXCEPTIONS = (
+    AttributeError,
+    TypeError,
+    ValueError,
+    OverflowError,
+    OSError,
+)
+
 
 def first_non_null(*values: Any) -> Any:
     for value in values:
@@ -76,13 +84,13 @@ def coerce_datetime_string(value: Any) -> str | None:
     if hasattr(value, "to_pydatetime"):
         try:
             return coerce_datetime_string(value.to_pydatetime())
-        except Exception:
+        except DATETIME_COERCION_EXCEPTIONS:
             return None
 
     if hasattr(value, "isoformat"):
         try:
             return str(value.isoformat())
-        except Exception:
+        except DATETIME_COERCION_EXCEPTIONS:
             return None
 
     return coerce_str(value)
