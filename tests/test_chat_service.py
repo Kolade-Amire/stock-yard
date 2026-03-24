@@ -26,7 +26,12 @@ from app.schemas.ticker import (
     TickerOverview,
     TickerOverviewResponse,
 )
-from app.services.chat_service import ChatService
+from app.services.chat_service import (
+    MODEL_FACING_AVAILABLE_DATA_HEADER,
+    MODEL_FACING_AVAILABLE_DATA_NOTE,
+    ChatService,
+    MemoizedToolEntry,
+)
 
 
 class FakeYFinanceService:
@@ -226,11 +231,11 @@ class FakeLLMProvider(LLMProvider):
                 }
             )
 
-        if self.force_cached_context_answer and "same chat session" in system_instruction:
+        if self.force_cached_context_answer and MODEL_FACING_AVAILABLE_DATA_HEADER in system_instruction:
             return LLMModelResponse(
                 parsed={
-                    "answer": "answered from cached context",
-                    "highlights": ["cached"],
+                    "answer": "answered from available data",
+                    "highlights": ["available-data"],
                     "limitations": [],
                 }
             )
@@ -288,6 +293,51 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
     def _metrics_snapshot(self) -> dict[str, Any]:
         return self.service._memo_metrics.snapshot()
 
+    def test_system_instruction_uses_neutral_available_data_language(self) -> None:
+        cached_context = self.service._build_cached_context(
+            symbol="AAPL",
+            entries=[
+                MemoizedToolEntry(
+                    tool_name="get_financial_summary",
+                    tool_key="get_financial_summary:{}",
+                    payload={},
+                    limitations=[],
+                    summary='{"revenueTTM":10.0}',
+                    cached_at=1.0,
+                    expires_at=2.0,
+                ),
+                MemoizedToolEntry(
+                    tool_name="get_stock_snapshot",
+                    tool_key="get_stock_snapshot:{}",
+                    payload={},
+                    limitations=["Delayed quote."],
+                    summary='{"currentPrice":190.0}',
+                    cached_at=1.0,
+                    expires_at=2.0,
+                ),
+            ],
+        )
+
+        self.assertIsNotNone(cached_context)
+        assert cached_context is not None
+        self.assertIn(MODEL_FACING_AVAILABLE_DATA_HEADER, cached_context)
+        self.assertIn(MODEL_FACING_AVAILABLE_DATA_NOTE, cached_context)
+        self.assertIn("Ticker: AAPL", cached_context)
+        self.assertIn("financial summary", cached_context)
+        self.assertIn("company overview", cached_context)
+        self.assertNotIn("cached context", cached_context.lower())
+        self.assertNotIn("same chat session", cached_context.lower())
+        self.assertNotIn("get_financial_summary", cached_context)
+        self.assertNotIn("get_stock_snapshot", cached_context)
+
+        system_instruction = self.service._build_system_instruction(
+            symbol="AAPL",
+            cached_context=cached_context,
+        )
+        self.assertIn("based on available data", system_instruction)
+        self.assertIn("based on currently available company data", system_instruction)
+        self.assertIn(MODEL_FACING_AVAILABLE_DATA_HEADER, system_instruction)
+
     async def test_chat_creates_session_and_records_cold_miss(self) -> None:
         response = await self.service.chat(
             ChatRequest(
@@ -334,6 +384,7 @@ class ChatServiceMemoizationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(second.sessionId, first.sessionId)
+        self.assertEqual(second.answer, "answered from available data")
         self.assertEqual(second.usedTools, [])
         self.assertEqual(self.yfinance.call_counts["earnings_context"], 1)
         self.assertEqual(self.yfinance.call_counts["earnings_history"], 1)

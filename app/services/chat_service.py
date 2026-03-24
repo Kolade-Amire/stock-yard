@@ -96,6 +96,21 @@ DEFAULT_MEMO_TTL_BY_TOOL: dict[str, int] = {
     "get_earnings_deep_context": 3600,
     "get_analyst_deep_context": 3600,
 }
+MODEL_FACING_AVAILABLE_DATA_HEADER = "Relevant available data for this symbol."
+MODEL_FACING_AVAILABLE_DATA_NOTE = (
+    "Treat the material below as available company data. "
+    "Do not mention how it was obtained or refer to internal systems."
+)
+MODEL_FACING_TOOL_LABELS: dict[str, str] = {
+    "get_stock_snapshot": "company overview",
+    "get_price_history": "price history",
+    "get_news_context": "recent news",
+    "get_financial_summary": "financial summary",
+    "get_financial_trends_context": "financial trends",
+    "get_earnings_deep_context": "earnings context",
+    "get_analyst_deep_context": "analyst context",
+    "get_ownership_context": "ownership context",
+}
 
 
 @dataclass(frozen=True)
@@ -534,10 +549,14 @@ INTENT_CATALOG: dict[str, IntentDefinition] = {
 
 CHAT_SYSTEM_INSTRUCTION = """
 You are a stock analysis assistant for one active ticker symbol.
-You must use tool results as the source of truth and remain grounded to the active symbol only.
+You must use available company data as the source of truth and remain grounded to the active symbol only.
 Never invent numbers, events, news, or metrics.
 If data is unavailable or uncertain, state that clearly.
 Use prior conversation turns to stay conversational and context-aware.
+When describing what an answer is based on, prefer neutral phrasing such as "based on available data"
+or "based on currently available company data."
+Do not mention internal mechanics such as caches, cached context, sessions, tool calls, tool names,
+memoization, snapshots, prompts, or internal processing details.
 Do not provide personalized investment advice or direct buy/sell instructions.
 Return only valid JSON that matches the required response schema.
 """.strip()
@@ -791,18 +810,23 @@ class ChatService:
             return None
 
         lines = [
-            "Previously grounded cached context is available for this same chat session.",
-            "Reuse it when it is sufficient instead of calling tools again.",
-            f"Cached ticker: {symbol}",
+            MODEL_FACING_AVAILABLE_DATA_HEADER,
+            MODEL_FACING_AVAILABLE_DATA_NOTE,
+            f"Ticker: {symbol}",
         ]
         for entry in entries:
-            line = f"- {entry.tool_name}: {entry.summary}"
+            context_label = self._model_facing_tool_label(entry.tool_name)
+            line = f"- {context_label}: {entry.summary}"
             compact_limitations = self._compact_limitations(entry.limitations)
             if compact_limitations:
                 serialized_limitations = json.dumps(compact_limitations, separators=(",", ":"))
                 line = f"{line}; limitations={serialized_limitations}"
             lines.append(line)
         return "\n".join(lines)
+
+    @staticmethod
+    def _model_facing_tool_label(tool_name: str) -> str:
+        return MODEL_FACING_TOOL_LABELS.get(tool_name, "additional company data")
 
     def _log_chat_request_summary(
         self,

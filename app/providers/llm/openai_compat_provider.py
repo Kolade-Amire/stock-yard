@@ -107,8 +107,7 @@ class OpenAICompatProvider(LLMProvider):
             )
             return LLMModelResponse(tool_calls=tool_calls)
 
-        text = self._extract_message_text(completion_message.content)
-        parsed = self._parse_json_text(text)
+        text, parsed = self._extract_structured_message_payload(completion_message)
         return LLMModelResponse(text=text, parsed=parsed)
 
     def _build_payload(
@@ -179,6 +178,25 @@ class OpenAICompatProvider(LLMProvider):
                 details={"provider": "openai_compat"},
             )
         return completion.choices[0].message
+
+    def _extract_structured_message_payload(
+        self,
+        message: Any,
+    ) -> tuple[str, dict[str, Any] | None]:
+        content_text = self._extract_message_text(getattr(message, "content", None))
+        content_parsed = self._parse_json_text(content_text)
+        if content_parsed is not None:
+            return content_text, content_parsed
+
+        reasoning_text = self._extract_message_text(self._extract_reasoning_content(message))
+        reasoning_parsed = self._parse_json_text(reasoning_text)
+        if reasoning_parsed is None:
+            return content_text, None
+
+        self._logger.info(
+            "OpenAI-compatible stage=structured-final response_source=reasoning_content"
+        )
+        return reasoning_text, reasoning_parsed
 
     @staticmethod
     def _extract_tool_calls(message: Any) -> list[ToolCall]:
@@ -262,6 +280,17 @@ class OpenAICompatProvider(LLMProvider):
         except json.JSONDecodeError:
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _extract_reasoning_content(message: Any) -> Any:
+        reasoning_content = getattr(message, "reasoning_content", None)
+        if reasoning_content is not None:
+            return reasoning_content
+
+        model_extra = getattr(message, "model_extra", None)
+        if isinstance(model_extra, dict):
+            return model_extra.get("reasoning_content")
+        return None
 
     @staticmethod
     def _extract_message_text(content: Any) -> str:
