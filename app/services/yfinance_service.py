@@ -94,6 +94,8 @@ MAX_EARNINGS_CALENDAR_LIMIT = 100
 DEFAULT_OWNERSHIP_LIMIT = 25
 MAX_OWNERSHIP_LIMIT = 100
 MAX_COMPARE_SYMBOLS = 5
+MAX_PLAIN_ALPHA_SYMBOL_LENGTH = 5
+SYMBOL_VALIDATION_SEARCH_LIMIT = 10
 MAX_ANALYST_HISTORY_ACTION_EVENTS = 25
 MAX_BENCHMARK_HOLDINGS = 5
 MAX_BENCHMARK_SECTOR_WEIGHTS = 5
@@ -200,7 +202,7 @@ YFINANCE_PROVIDER_EXCEPTIONS = (
 )
 ROW_ACCESS_EXCEPTIONS = (AttributeError, KeyError, IndexError, TypeError)
 TO_PYDATETIME_EXCEPTIONS = (AttributeError, TypeError, ValueError, OSError, OverflowError)
-MAPPING_COERCION_EXCEPTIONS = (TypeError, ValueError)
+MAPPING_COERCION_EXCEPTIONS = (KeyError, TypeError, ValueError)
 
 
 class YFinanceService:
@@ -244,6 +246,7 @@ class YFinanceService:
         self._analyst_summary_cache = TTLCache[AnalystSummaryResponse](cache_ttl_analyst_seconds)
         self._analyst_history_cache = TTLCache[AnalystHistoryResponse](cache_ttl_analyst_seconds)
         self._compare_cache = TTLCache[TickerCompareResponse](cache_ttl_history_seconds)
+        self._symbol_validation_cache = TTLCache[bool](cache_ttl_overview_seconds)
         self._options_expirations_cache = TTLCache[OptionsExpirationsResponse](
             cache_ttl_history_seconds
         )
@@ -602,8 +605,7 @@ class YFinanceService:
         self._options_chain_cache.set(cache_key, response)
         return response
 
-    @staticmethod
-    def _normalize_and_validate_symbol(symbol: str) -> str:
+    def _normalize_and_validate_symbol(self, symbol: str) -> str:
         normalized_symbol = normalize_symbol(symbol)
         if not is_valid_symbol(normalized_symbol):
             raise ApiError(
@@ -612,7 +614,44 @@ class YFinanceService:
                 status_code=400,
                 details={"symbol": symbol},
             )
+        if (
+            normalized_symbol.isalpha()
+            and len(normalized_symbol) > MAX_PLAIN_ALPHA_SYMBOL_LENGTH
+        ):
+            raise ApiError(
+                code="INVALID_SYMBOL",
+                message="Ticker symbol must be a valid market symbol such as AAPL or MSFT.",
+                status_code=400,
+                details={"symbol": symbol},
+            )
+        if (
+            normalized_symbol.isalpha()
+            and len(normalized_symbol) == MAX_PLAIN_ALPHA_SYMBOL_LENGTH
+            and not self._has_exact_symbol_search_match(normalized_symbol)
+        ):
+            raise ApiError(
+                code="INVALID_SYMBOL",
+                message="Ticker symbol must be a valid market symbol such as AAPL or MSFT.",
+                status_code=400,
+                details={"symbol": symbol},
+            )
         return normalized_symbol
+
+    def _has_exact_symbol_search_match(self, symbol: str) -> bool:
+        cached = self._symbol_validation_cache.get(symbol)
+        if cached is not None:
+            return cached
+
+        raw_quotes = self._fetch_search_quotes(
+            query=symbol,
+            limit=SYMBOL_VALIDATION_SEARCH_LIMIT,
+        )
+        has_exact_match = any(
+            result is not None and result.symbol == symbol
+            for result in (self._map_search_result(quote) for quote in raw_quotes)
+        )
+        self._symbol_validation_cache.set(symbol, has_exact_match)
+        return has_exact_match
 
     @staticmethod
     def _normalize_and_validate_mover_screen(screen: str) -> str:

@@ -101,6 +101,8 @@ Searches tickers by free-text query and returns normalized equity/ETF matches on
 
 - Search results are filtered to quote types `EQUITY` and `ETF`.
 - Results are normalized into a lightweight search shape.
+- This is the free-text entrypoint for company-name searches and search-box input.
+- Use each result's `symbol` for downstream ticker-detail requests; `name` is display-only.
 - A whitespace-only query can still fail at the service layer with `400 VALIDATION_ERROR` after trimming.
 
 **Response shape**
@@ -142,6 +144,8 @@ Returns a normalized ticker overview.
 
 **Behavior**
 
+- This endpoint and related `/tickers/{symbol}/...` endpoints require a resolved Yahoo-style symbol such as `AAPL`, `MSFT`, or `GOOGL`.
+- Obvious company-name or unresolved free-text inputs such as `MICROSOFT`, `AMAZON`, and `APPLE` return `400 INVALID_SYMBOL` instead of reaching the detail fetch path.
 - Response shape is stable even when some fields are unavailable.
 - Missing fields are `null`.
 - `dataLimitations` explains important missing data, for example unavailable earnings date.
@@ -216,6 +220,7 @@ Returns normalized OHLCV chart history for a curated set of periods and interval
 
 **Behavior**
 
+- The `symbol` path parameter must be a resolved Yahoo-style ticker symbol, not free-text company input.
 - Unsupported period/interval combinations return `400 INVALID_PERIOD_INTERVAL`.
 - Intraday combinations are restricted:
   - `1m`: `1d`, `5d`
